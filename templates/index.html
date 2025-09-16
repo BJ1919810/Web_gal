@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Galgame Demo</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/gh/dylanNew/live2d/webgl/Live2D/lib/live2d.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/pixi.js@6.5.2/dist/browser/pixi.min.js"></script>
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script src="/static/js/script.js"></script>
+</head>
+<body>
+    <div id="game">
+        <!-- 语音播放器 -->
+        <audio id="voice-player" hidden></audio>
+        <img id="background" src="/static/images/bg.jpg" alt="background">
+        <div id="live2d-container">
+            <canvas id="canvas2"></canvas>
+        </div>
+        <div id="dialogue-box">
+            <p id="dialogue">你好，欢迎来到这个世界！</p>
+        </div>
+
+        <div id="input-area">
+            <input type="text" id="user-input" placeholder="请输入内容..." />
+            <button id="submit-btn">提交</button>
+        </div>
+    </div>
+    <audio id="bgm" src="/static/audio/bgm.ogg" loop></audio>
+</body>
+</html>
