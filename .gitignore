@@ -1,0 +1,5 @@
+GSV/**/*
+
+!GSV/api.bat
+!GSV/Install_GSV_here.txt
+!GSV/requirements.txt

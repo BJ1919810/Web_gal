@@ -154,27 +154,17 @@ function getLive2DModelClass() {
  * 加载Live2D模型
  */
 async function loadLive2DModel(Live2DModel) {
-    const modelPaths = [
-        '/live2d_assets/nahida/草神.model3.json',
-        '/live2d_assets/shizuku/shizuku.model.json'
-    ];
-    
-    for (const modelPath of modelPaths) {
-        try {
-            console.log('尝试加载Live2D模型:', modelPath);
-            
-            // 检查模型文件是否存在
-            const response = await fetch(modelPath);
-            if (!response.ok) continue;
-            
-            // 加载模型
-            const model = await Live2DModel.from(modelPath, {autoInteract: false});
-            console.log('Live2D模型加载成功:', modelPath);
-            return model;
-            
-        } catch (error) {
-            console.warn('Live2D模型加载失败:', error);
-        }
+    const modelPath = '/live2d_assets/nahida/草神.model3.json'; 
+    try {
+        console.log('尝试加载Live2D模型:', modelPath);
+        
+        // 加载模型
+        const model = await Live2DModel.from(modelPath, {autoInteract: false});
+        console.log('Live2D模型加载成功:', modelPath);
+        return model;
+        
+    } catch (error) {
+        console.warn('Live2D模型加载失败:', error);
     }
     
     return null;
@@ -235,8 +225,8 @@ function setupModel() {
         const ny = Math.max(-1, Math.min(1, dy * sensitivity));
 
         // 最大角度
-        targetX = -nx * 50; // 左右最大 50°
-        targetY = -ny * 50; // 上下最大 50°
+        targetX = -nx * 60; // 左右最大 60°
+        targetY = -ny * 60; // 上下最大 60°
     }
 
     // 每帧缓动更新视线
@@ -743,9 +733,13 @@ function updateModelMouthShape(value) {
         // 确保值在有效范围内
         const normalizedValue = Math.max(0, Math.min(1, value));
         
+        // 控制口型最大张开程度 - 限制为原来的60%
+        const maxMouthOpenScale = 0.6; // 可以调整这个值来控制口型的最大张开程度
+        const scaledValue = normalizedValue * maxMouthOpenScale;
+        
         // 更新模型口型参数
         if (AppState.model.internalModel && AppState.model.internalModel.coreModel) {
-            AppState.model.internalModel.coreModel.setParameterValueById('ParamMouthOpenY', normalizedValue);
+            AppState.model.internalModel.coreModel.setParameterValueById('ParamMouthOpenY', scaledValue);
         }
         
     } catch (error) {

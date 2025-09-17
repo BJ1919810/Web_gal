@@ -9,8 +9,8 @@
 		"DisplayInfo": "草神.cdi3.json",
 		"Expressions": [
 			{
-				"Name": "黑.exp3.json",
-				"File": "expressions/黑.exp3.json"
+				"Name": "脸黑.exp3.json",
+				"File": "expressions/脸黑.exp3.json"
 			},
 			{
 				"Name": "脸红.exp3.json",
@@ -29,16 +29,16 @@
 				"File": "expressions/泪.exp3.json"
 			},
 			{
-				"Name": "姿势1.exp3.json",
-				"File": "expressions/姿势1.exp3.json"
+				"Name": "祈祷.exp3.json",
+				"File": "expressions/祈祷.exp3.json"
 			},
 			{
-				"Name": "姿势2.exp3.json",
-				"File": "expressions/姿势2.exp3.json"
+				"Name": "好奇.exp3.json",
+				"File": "expressions/好奇.exp3.json"
 			},
 			{
-				"Name": "姿势3.exp3.json",
-				"File": "expressions/姿势3.exp3.json"
+				"Name": "翻花绳.exp3.json",
+				"File": "expressions/翻花绳.exp3.json"
 			},
 			{
 				"Name": "叶子.exp3.json",
