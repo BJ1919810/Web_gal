@@ -15,7 +15,7 @@
 在运行应用前，请确保安装了以下依赖：
 
 ```bash
-pip install flask requests librosa pygame numpy openai
+pip install flask requests librosa numpy openai
 ```
 
 ## 运行步骤
