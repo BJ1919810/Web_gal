@@ -8,13 +8,26 @@ const AppState = {
     analyser: null,
     audioSource: null,
     activeAudioUrl: null,
+    currentPlayingAudioUrl: null, // 当前正在播放的音频URL
     
     // 模型相关状态
     model: null,
     app: null,
     
     // 动画状态
-    animationFrameId: null
+    animationFrameId: null,
+    
+    // 表情相关状态
+    currentExpression: null,
+    expressionQueue: [],
+    
+    // 新增：表情与语音分段处理相关状态
+    isProcessingSequence: false,
+    currentSequenceIndex: 0,
+    dialogueSequence: [],
+    
+    // 新增：TTS音频预加载缓存
+    ttsAudioCache: new Map()
 };
 
 /**
@@ -273,6 +286,64 @@ function updateModelTransform() {
 }
 
 /**
+ * 将文本按照表情标签分段，创建表情与语音的序列
+ * @param {string} text - 包含表情标签的文本
+ * @returns {Array} - 包含表情和对应文本的序列数组
+ */
+function createDialogueSequence(text) {
+    const sequence = [];
+    let currentText = '';
+    let index = 0;
+    
+    // 默认开始时没有表情
+    let currentEmotion = null;
+    
+    while (index < text.length) {
+        if (text.charAt(index) === '[') {
+            // 找到表情标签的开始
+            const endIndex = text.indexOf(']', index);
+            if (endIndex !== -1) {
+                // 提取标签内容
+                const emotionTag = text.substring(index + 1, endIndex);
+                
+                // 如果当前有累积的文本，将其添加到序列中
+                if (currentText.trim() !== '') {
+                    sequence.push({
+                        emotion: currentEmotion,
+                        text: currentText.trim()
+                    });
+                    currentText = '';
+                }
+                
+                // 设置当前表情
+                currentEmotion = emotionTag;
+                
+                // 跳过整个标签
+                index = endIndex + 1;
+            } else {
+                // 没有找到对应的结束标签，正常处理字符
+                currentText += text.charAt(index);
+                index++;
+            }
+        } else {
+            // 正常处理字符
+            currentText += text.charAt(index);
+            index++;
+        }
+    }
+    
+    // 添加最后一段文本（如果有）
+    if (currentText.trim() !== '') {
+        sequence.push({
+            emotion: currentEmotion,
+            text: currentText.trim()
+        });
+    }
+    
+    return sequence;
+}
+
+/**
  * 显示模型加载错误
  */
 function showModelError() {
@@ -321,48 +392,130 @@ async function handleUserInput() {
         // 获取回复
         const reply = await getAIReply(inputText);
         
-        // 播放语音
-        await playVoice(reply);
+        // 创建对话序列
+        const sequence = createDialogueSequence(reply);
         
-        // 使用打字机效果显示对话
-        typewriterEffect(DOM.dialogue, reply);
+        // 如果序列为空，直接显示原文本
+        if (sequence.length === 0) {
+            DOM.dialogue.textContent = reply;
+            return;
+        }
+        
+        // 设置序列状态
+        AppState.dialogueSequence = sequence;
+        AppState.currentSequenceIndex = 0;
+        AppState.isProcessingSequence = true;
+        
+        try {
+            // 等待所有序列项的TTS音频预加载完成，再开始处理序列
+            await preloadAllTTSAudio(sequence);
+                    
+            // 清空对话框
+            DOM.dialogue.textContent = '';
+
+            // 预加载完成后开始处理序列
+            processNextSequenceItem();
+        } catch (preloadError) {
+            console.error('音频预加载过程中发生错误:', preloadError);
+            // 即使预加载失败也继续处理序列
+
+            // 清空对话框
+            DOM.dialogue.textContent = '';
+
+            processNextSequenceItem();
+        }
         
     } catch (error) {
         console.error('处理对话失败:', error);
         DOM.dialogue.textContent = '出错了，请稍后再试。';
+        AppState.isProcessingSequence = false;
     }
 }
 
 /**
  * 打字机效果函数
- * 使文本一个字一个字地显示出来
- * param {HTMLElement} element - 要显示文本的DOM元素
- * param {string} text - 要显示的文本内容
- * param {number} speed - 每个字之间的延迟时间（毫秒）
- * param {Function} callback - 文本显示完成后的回调函数
+ * 使文本一个字一个字地显示出来，同时支持表情标签触发
+ * @param {HTMLElement} element - 要显示文本的DOM元素
+ * @param {string} text - 要显示的文本内容
+ * @param {boolean} append - 是否追加到现有内容后面
+ * @param {number} speed - 每个字之间的延迟时间（毫秒）
  */
-function typewriterEffect(element, text, speed = 50, callback = null) {
-    if (!element) return;
-    
-    let index = 0;
-    element.textContent = '';
-    
-    function typeNext() {
-        if (index < text.length) {
-            // 添加下一个字符
-            element.textContent += text.charAt(index);
-            index++;
-            
-            // 设置下一个字符的定时器
-            setTimeout(typeNext, speed);
-        } else if (callback) {
-            // 文本显示完成，执行回调
-            callback();
+function typewriterEffect(element, text, append = false, speed = 50) {
+    return new Promise(resolve => {
+        if (!element) {
+            resolve();
+            return;
         }
-    }
-    
-    // 开始打字效果
-    typeNext();
+        
+        // 用于调试：在UI中显示表情标签
+        let displayText = text;
+        
+        let index = 0;
+        // 保存初始文本（如果是追加模式）
+        const initialText = append ? element.textContent : '';
+        // 如果不是追加模式，清空元素
+        if (!append) {
+            element.textContent = '';
+        }
+        
+        function typeNext() {
+            if (index < displayText.length) {
+                // 检查当前字符是否是表情标签的开始
+                if (displayText.charAt(index) === '[') {
+                    // 尝试找到对应的结束标签
+                    const endIndex = displayText.indexOf(']', index);
+                    if (endIndex !== -1) {
+                        const tagContent = displayText.substring(index + 1, endIndex);
+                        const fullTag = displayText.substring(index, endIndex + 1);
+                        
+                        // 直接显示完整的标签
+                        element.textContent = initialText + displayText.substring(0, index) + fullTag;
+                        index = endIndex + 1;
+                        
+                        // 触发表情应用
+                        AppState.expressionQueue.push(tagContent);
+                        checkAndApplyNextExpression();
+                    } else {
+                        // 没有找到对应的结束标签，正常显示字符
+                        element.textContent = initialText + displayText.substring(0, index + 1);
+                        index++;
+                    }
+                } else {
+                    // 正常显示字符
+                    element.textContent = initialText + displayText.substring(0, index + 1);
+                    index++;
+                }
+                
+                // 检查并应用队列中的表情
+                if (AppState.expressionQueue.length > 0) {
+                    checkAndApplyNextExpression();
+                }
+                
+                // 设置下一个字符的定时器
+                setTimeout(typeNext, speed);
+            } else {
+                // 文本显示完成，检查是否有剩余的表情需要应用
+                if (AppState.expressionQueue.length > 0) {
+                    // 应用剩余的表情
+                    applyExpression(AppState.expressionQueue[AppState.expressionQueue.length - 1]);
+                }
+                
+                // 解析Promise
+                resolve();
+            }
+        }
+        
+        // 检查并应用队列中的下一个表情
+        function checkAndApplyNextExpression() {
+            if (AppState.expressionQueue.length > 0) {
+                const nextExpression = AppState.expressionQueue.shift();
+                applyExpression(nextExpression);
+            }
+        }
+        
+        // 开始打字效果
+        typeNext();
+    });
 }
 
 /**
@@ -409,71 +562,160 @@ function initBGM() {
 }
 
 /**
+ * 预加载所有序列项的TTS音频
+ * @param {Array} sequence - 对话序列
+ * @returns {Promise} - 返回预加载完成的Promise
+ */
+async function preloadAllTTSAudio(sequence) {
+    // 获取当前序列需要的文本内容
+    const neededTexts = new Set(sequence.map(item => item.text));
+    
+    // 只保留当前序列需要的缓存，移除其他缓存以释放内存
+    for (const key of AppState.ttsAudioCache.keys()) {
+        if (!neededTexts.has(key)) {
+            AppState.ttsAudioCache.delete(key);
+        }
+    }
+    
+    // 并发预加载所有需要但尚未缓存的音频
+    const preloadPromises = sequence.map(item => {
+        // 检查是否已经在缓存中
+        if (AppState.ttsAudioCache.has(item.text)) {
+            console.log(`使用已缓存的TTS音频: ${item.text.substring(0, 20)}...`);
+            return Promise.resolve();
+        }
+        
+        return fetchTTSAudio(item.text).then(blob => {
+            // 缓存预加载的音频数据
+            AppState.ttsAudioCache.set(item.text, blob);
+            console.log(`成功预加载TTS音频: ${item.text.substring(0, 20)}...`);
+        }).catch(error => {
+            console.warn(`预加载TTS音频失败: ${error.message}`);
+            // 即使失败也不阻止程序继续运行
+        });
+    });
+    
+    // 等待所有预加载完成
+    await Promise.all(preloadPromises);
+    console.log('所有TTS音频预加载完成');
+    
+    return Promise.resolve();
+}
+
+/**
  * 播放语音
  */
 async function playVoice(text) {
-    // 重置之前的状态
-    resetVoiceState();
-    
-    if (!DOM.voicePlayer) {
-        console.error('语音播放器元素不存在');
-        fallbackMouthAnimation(); // 即使没有播放器也显示口型动画
-        return;
-    }
-    
-    try {
-        // 请求TTS服务获取语音
-        const blob = await fetchTTSAudio(text);
+    // 返回Promise，确保函数能够正确等待语音播放完成
+    return new Promise((resolve, reject) => {
+        // 重置之前的状态，但不释放资源
+        resetVoiceState(false);
         
-        // 检查获取的blob是否有效
-        if (!blob || blob.size === 0) {
-            throw new Error('获取到的音频数据为空');
+        if (!DOM.voicePlayer) {
+            console.error('语音播放器元素不存在');
+            fallbackMouthAnimation(); // 即使没有播放器也显示口型动画
+            resolve(); // 确保Promise被解析
+            return;
         }
         
-        // 创建音频URL
-        AppState.activeAudioUrl = URL.createObjectURL(blob);
-        
-        // 完全重置音频元素，这是解决"already connected"错误的关键
-        resetAudioElement(DOM.voicePlayer);
-        
-        // 设置音频源
-        DOM.voicePlayer.src = AppState.activeAudioUrl;
-        
-        // 预加载音频
-        await DOM.voicePlayer.load();
-        
-        // 连接音频分析器 - 使用全新的策略
-        if (!connectAudioAnalyser()) {
-            // 如果连接分析器失败，使用备用口型动画
-            console.warn('音频分析器连接失败，将使用模拟口型动画');
+        try {
+            // 首先检查是否有预加载的音频数据
+            const cachedAudio = AppState.ttsAudioCache.get(text);
+            
+            if (cachedAudio) {
+                console.log('使用预加载的TTS音频');
+                processAudioData(cachedAudio);
+            } else {
+                console.log('请求TTS音频...');
+                // 如果没有预加载，则请求TTS服务获取语音
+                fetchTTSAudio(text).then(blob => {
+                    processAudioData(blob);
+                }).catch(error => {
+                    console.error('获取TTS音频失败:', error);
+                    // 确保即使在错误情况下也正确清理资源
+                    setTimeout(() => {
+                        resetVoiceState();
+                        fallbackMouthAnimation();
+                        resolve(); // 确保Promise被解析
+                    }, 100);
+                });
+            }
+            
+            // 处理音频数据的辅助函数
+            function processAudioData(blob) {
+                // 检查获取的blob是否有效
+                if (!blob || blob.size === 0) {
+                    throw new Error('获取到的音频数据为空');
+                }
+                
+                // 完全重置音频元素
+                resetAudioElement(DOM.voicePlayer);
+                
+                // 创建音频URL
+                const audioUrl = URL.createObjectURL(blob);
+                AppState.activeAudioUrl = audioUrl;
+                
+                // 设置音频源（必须在重置元素后设置）
+                DOM.voicePlayer.src = audioUrl;
+                
+                // 存储当前播放的音频URL，避免被过早释放
+                AppState.currentPlayingAudioUrl = audioUrl;
+                
+                // 连接音频分析器
+                if (!connectAudioAnalyser()) {
+                    console.warn('音频分析器连接失败，将使用模拟口型动画');
+                }
+                
+                // 预加载音频
+                DOM.voicePlayer.load();
+                
+                // 播放结束后清理
+                DOM.voicePlayer.onended = function() {
+                    // 确保在清理前等待一小段时间
+                    setTimeout(() => {
+                        cleanupVoicePlayback(audioUrl); // 传递具体的audioUrl
+                        resolve(); // 播放完成后解析Promise
+                    }, 100);
+                };
+                
+                // 错误处理
+                DOM.voicePlayer.onerror = function(error) {
+                    console.error('音频播放错误:', error);
+                    cleanupVoicePlayback(audioUrl); // 传递具体的audioUrl
+                    fallbackMouthAnimation(); // 显示备用口型动画
+                    resolve(); // 即使失败也解析Promise，避免阻塞
+                };
+                
+                // 开始播放语音
+                DOM.voicePlayer.play().then(() => {
+                    AppState.isVoicePlaying = true;
+                    
+                    // 开始口型同步或使用备用动画
+                    if (AppState.analyser) {
+                        startMouthShapeSync();
+                    } else {
+                        fallbackMouthAnimation();
+                    }
+                }).catch(error => {
+                    console.error('播放语音失败:', error);
+                    // 确保即使在错误情况下也正确清理资源
+                    setTimeout(() => {
+                        resetVoiceState();
+                        fallbackMouthAnimation();
+                        resolve(); // 确保Promise被解析
+                    }, 100);
+                });
+            }
+        } catch (error) {
+            console.error('播放语音过程中发生异常:', error);
+            // 确保即使在错误情况下也正确清理资源
+            setTimeout(() => {
+                resetVoiceState();
+                fallbackMouthAnimation();
+                resolve(); // 确保Promise被解析
+            }, 100);
         }
-        
-        // 开始播放语音
-        await DOM.voicePlayer.play();
-        AppState.isVoicePlaying = true;
-        
-        // 开始口型同步或使用备用动画
-        if (AppState.analyser) {
-            startMouthShapeSync();
-        } else {
-            fallbackMouthAnimation();
-        }
-        
-        // 播放结束后清理
-        DOM.voicePlayer.onended = function() {
-            // 确保在清理前等待一小段时间
-            setTimeout(cleanupVoicePlayback, 100);
-        };
-        
-    } catch (error) {
-        console.error('播放语音失败:', error);
-        // 确保即使在错误情况下也正确清理资源
-        setTimeout(() => {
-            resetVoiceState();
-            // 播放失败时使用模拟口型动画
-            fallbackMouthAnimation();
-        }, 100);
-    }
+    });
 }
 
 /**
@@ -775,8 +1017,9 @@ function fallbackMouthAnimation() {
 
 /**
  * 清理语音播放资源
+ * @param {string} audioUrl - 要释放的特定音频URL，可选
  */
-function cleanupVoicePlayback() {
+function cleanupVoicePlayback(audioUrl) {
     // 停止口型同步
     AppState.isVoicePlaying = false;
     
@@ -799,32 +1042,219 @@ function cleanupVoicePlayback() {
         AppState.audioSource = null;
     }
     
+    // 只有当明确提供了audioUrl且与当前播放的URL匹配时，才清除当前播放的URL引用
+    if (audioUrl && audioUrl === AppState.currentPlayingAudioUrl) {
+        AppState.currentPlayingAudioUrl = null;
+    }
+    
     // 延迟释放音频URL，确保在所有操作完成后再释放
-    if (AppState.activeAudioUrl) {
+    if (audioUrl) {
         // 使用setTimeout确保在当前事件循环结束后再释放资源
         setTimeout(() => {
-            try {
-                URL.revokeObjectURL(AppState.activeAudioUrl);
-            } catch (e) {
-                console.warn('释放音频URL时出错:', e);
+            // 再次检查这个URL是否正在被其他播放使用
+            if (audioUrl !== AppState.currentPlayingAudioUrl) {
+                try {
+                    URL.revokeObjectURL(audioUrl);
+                    console.log('成功释放音频URL');
+                } catch (e) {
+                    console.warn('释放音频URL时出错:', e);
+                }
             }
-            AppState.activeAudioUrl = null;
-        }, 500); // 延迟500ms释放，确保音频播放完全结束
+        }, 500); // 增加延迟时间到500ms，确保音频播放完全结束并且不会影响后续播放
+    }
+    
+    // 清除AppState中的activeAudioUrl引用
+    AppState.activeAudioUrl = null;
+}
+
+/**
+ * 处理下一个对话序列项
+ */
+async function processNextSequenceItem() {
+    if (!AppState.isProcessingSequence || !AppState.dialogueSequence) {
+        return;
+    }
+    
+    // 检查是否处理完所有序列项
+    if (AppState.currentSequenceIndex >= AppState.dialogueSequence.length) {
+        AppState.isProcessingSequence = false;
+        AppState.dialogueSequence = null;
+        return;
+    }
+    
+    try {
+        // 获取当前序列项
+        const currentItem = AppState.dialogueSequence[AppState.currentSequenceIndex];
+        
+        console.log(`处理序列项 ${AppState.currentSequenceIndex + 1}/${AppState.dialogueSequence.length}`, currentItem);
+        
+        // 如果有表情，应用表情
+        if (currentItem.emotion) {
+            applyExpression(currentItem.emotion);
+        }
+
+        // 并行执行打字机效果和语音播放，减少用户感知的延迟
+        const typewriterPromise = typewriterEffect(DOM.dialogue, currentItem.text + ' ', true);
+        const voicePromise = playVoice(currentItem.text);
+
+        // 等待两者都完成
+        await Promise.all([typewriterPromise, voicePromise]);
+        
+        // 移动到下一个序列项
+        AppState.currentSequenceIndex++;
+        
+        // 递归处理下一个序列项 - 使用setTimeout确保当前的调用栈完成
+        setTimeout(processNextSequenceItem, 10);
+        
+    } catch (error) {
+        console.error('处理序列项失败:', error);
+        AppState.isProcessingSequence = false;
+        // 显示错误消息，但保留已显示的文本
+        DOM.dialogue.textContent += ' [处理对话时出错]';
+    }
+}
+
+/**
+ * 应用表情到Live2D模型
+ * @param {string} emotionTag - 表情标签名称
+ */
+
+function resetExpression() {
+    const core = AppState.model.internalModel.coreModel;
+    if (!core) {
+        console.error('模型核心不存在，无法重置表情');
+        return;
+    }
+    
+    // 重置所有表情相关参数
+    try {
+        core.setParameterValueById('Param43', 0);
+        core.setParameterValueById('Param54', 0);
+        core.setParameterValueById('Param57', 0);
+        core.setParameterValueById('Param55', 0);
+        core.setParameterValueById('Param44', 0);
+        core.setParameterValueById('Param59', 0);
+        core.setParameterValueById('Param42', 0);
+        core.setParameterValueById('Param56', 0);
+        core.setParameterValueById('Param60', 0);
+        core.setParameterValueById('Param58', 0);
+        core.saveParameters();
+    } catch (error) {
+        console.error('重置表情参数失败:', error);
+    }
+}
+
+function applyExpression(emotionTag) {
+    if (!AppState.model || !AppState.model.internalModel || !AppState.model.internalModel.coreModel) {
+        console.warn('模型未初始化，无法应用表情');
+        return;
+    }
+    
+    const core = AppState.model.internalModel.coreModel;
+    
+    // 如果标签为空，重置表情
+    if (!emotionTag || emotionTag.trim() === '') {
+        // 重置所有表情相关参数
+        try {
+            resetExpression();
+            AppState.currentExpression = null;
+            console.log('表情已重置');
+        } catch (error) {
+            console.error('重置表情失败:', error);
+        }
+        return;
+    }
+    
+    // 根据标签应用不同的表情
+    try {
+        console.log(`尝试应用表情: ${emotionTag}`);
+        
+        // 先重置表情，确保没有残留效果
+        resetExpression();
+        
+        switch (emotionTag) {
+            case '脸红':
+                core.setParameterValueById('Param43', 30);
+                console.log('应用表情成功: 脸红 (Param43 = 30)');
+                break;
+            case '生气':
+                core.setParameterValueById('Param54', 30);
+                console.log('应用表情成功: 生气 (Param54 = 30)');
+                break;
+            case '好奇':
+                core.setParameterValueById('Param57', 30);
+                console.log('应用表情成功: 好奇 (Param57 = 30)');
+                break;
+            case '泪':
+                core.setParameterValueById('Param55', 30);
+                console.log('应用表情成功: 泪 (Param55 = 30)');
+                break;
+            case '星星':
+                core.setParameterValueById('Param44', 30);
+                console.log('应用表情成功: 星星 (Param44 = 30)');
+                break;
+            case '发光':
+                core.setParameterValueById('Param59', 30);
+                console.log('应用表情成功: 发光 (Param59 = 30)');
+                break;
+            case '脸黑':
+                core.setParameterValueById('Param42', 30);
+                console.log('应用表情成功: 脸黑 (Param42 = 30)');
+                break;
+            case '祈祷':
+                core.setParameterValueById('Param56', 30);
+                core.setParameterValueById('Param60', 30);
+                console.log('应用表情成功: 祈祷 (Param56 = 30, Param60 = 30)');
+                break;
+            case '翻花绳':
+                core.setParameterValueById('Param58', 30);
+                console.log('应用表情成功: 翻花绳 (Param58 = 30)');
+                break;
+            default:
+                console.log('未知表情标签:', emotionTag);
+                return;
+        }
+        
+        // 保存参数确保表情生效
+        core.saveParameters();
+        AppState.currentExpression = emotionTag;
+        
+        // 添加一个小延迟确保表情有足够时间渲染
+        setTimeout(() => {
+            console.log(`表情${emotionTag}渲染完成`);
+        }, 100);
+        
+    } catch (error) {
+        console.error(`应用表情${emotionTag}失败:`, error);
+        // 尝试获取所有可用参数，用于调试
+        try {
+            console.log('当前可用参数:');
+            for (let i = 0; i < Math.min(core.getParameterCount(), 10); i++) {
+                const id = core.getParameterId(i);
+                const value = core.getParameterValueById(id);
+                console.log(`${id}: ${value}`);
+            }
+        } catch (innerError) {
+            console.warn('获取参数信息失败:', innerError);
+        }
     }
 }
 
 /**
  * 重置语音状态
+ * @param {boolean} releaseResources - 是否释放音频资源，默认为false
  */
-function resetVoiceState() {
+function resetVoiceState(releaseResources = false) {
     // 停止播放并重置时间
     if (DOM.voicePlayer) {
         DOM.voicePlayer.pause();
         DOM.voicePlayer.currentTime = 0;
     }
     
-    // 重置状态
-    cleanupVoicePlayback();
+    // 只在明确需要释放资源时调用cleanupVoicePlayback
+    if (releaseResources) {
+        cleanupVoicePlayback(AppState.activeAudioUrl);
+    }
 }
 
 // 等待DOM加载完成后初始化应用

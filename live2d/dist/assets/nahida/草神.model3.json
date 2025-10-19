@@ -49,10 +49,16 @@
 				"File": "expressions/发光.exp3.json"	
 			}
 		],
-		"Motions": {
+		"Motions": [
+			{
 			"Name": "待机动画.motion3.json",
 			"File": "motions/待机动画.motion3.json"
-    	}
+    		},
+			{
+			"Name": "1.motion3.json",
+			"File": "motions/1.motion3.json"
+    		}
+		]
 	},
 	"Groups": [
 		{

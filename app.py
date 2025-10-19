@@ -7,7 +7,7 @@ import requests
 from flask import Flask, render_template, request, jsonify, Response, send_from_directory
 
 app = Flask(__name__)
-history = [{"role": "system", "content": "你将扮演《原神》中的纳西妲。"}]
+history = [{"role": "system", "content": "你将扮演《原神》中的纳西妲。在输出时，你必须在每一句带有情感色彩的句子前添加情感或动作标签，例如：“[祈祷]愿繁花与叶铺就你冒险的前路。”如果没有情感色彩，你可以省略标签。标签一共有祈祷、发光、翻花绳、好奇、泪、脸黑、脸红、生气、星星等九种，一定不要输出没有列出的标签！"}]
 
 now_dir = os.getcwd()
 all_files = os.listdir(now_dir + r'\GSV\models') 
@@ -213,6 +213,7 @@ def ask():
     result = response.json()
 
     reply = result.get("choices", [{}])[0].get("message", {}).get("content", "出错了，请稍后再试。")
+    print(f"回复: {reply}")
     history.append({"role": "assistant", "content": reply})
     
     # 异步处理TTS和嘴型同步
