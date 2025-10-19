@@ -8,6 +8,7 @@
 - 对话交互功能（使用DeepSeek API）
 - 语音合成（GPT-SoViTS）
 - 嘴型随声音大小实时变换
+- 表情与动作随对话内容的推进而改变
 - 背景音乐播放
 
 ## 安装依赖
@@ -15,7 +16,7 @@
 在运行应用前，请确保安装了以下依赖：
 
 ```bash
-pip install flask requests librosa pygame numpy openai
+pip install flask requests librosa numpy openai
 ```
 
 ## 运行步骤

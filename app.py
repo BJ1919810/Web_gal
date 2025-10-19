@@ -199,7 +199,7 @@ def index():
 @app.route('/api/ask', methods=['POST'])
 def ask():
     user_input = request.json.get("message")
-    api_key="sk-c613f87202844699ba44e1c4d06e255e"
+    api_key="YOUR-API-KEY-HERE"
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
