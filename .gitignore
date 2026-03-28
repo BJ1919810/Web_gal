@@ -1,0 +1,12 @@
+setup_live2d.bat
+.env
+GSV/**/*
+backup/**
+chroma_db/**
+__pycache__/**
+knowledge/**/*
+models/**
+
+!knowledge/MEMORY.md
+!GSV/api.bat
+!GSV/Install_GSV_here.txt
