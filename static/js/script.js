@@ -2,32 +2,24 @@
 
 // 集中管理应用的核心状态和资源
 const AppState = {
-    // 音频相关状态
     isVoicePlaying: false,
     audioContext: null,
     analyser: null,
     audioSource: null,
     activeAudioUrl: null,
-    currentPlayingAudioUrl: null, // 当前正在播放的音频URL
-    
-    // 模型相关状态
+    currentPlayingAudioUrl: null,
     model: null,
     app: null,
-    
-    // 动画状态
     animationFrameId: null,
-    
-    // 表情相关状态
     currentExpression: null,
     expressionQueue: [],
-    
-    // 新增：表情与语音分段处理相关状态
     isProcessingSequence: false,
     currentSequenceIndex: 0,
     dialogueSequence: [],
-    
-    // 新增：TTS音频预加载缓存
-    ttsAudioCache: new Map()
+    ttsAudioCache: new Map(),
+    isAgentMode: false,
+    currentToolCalls: [],
+    chatHistory: []
 };
 
 /**
@@ -40,7 +32,15 @@ const DOM = {
     canvas: null,
     dialogue: null,
     userInput: null,
-    submitBtn: null
+    submitBtn: null,
+    modeIndicator: null,
+    agentTools: null,
+    agentSwitch: null,
+    modeLabel: null,
+    logBtn: null,
+    logPanel: null,
+    logCloseBtn: null,
+    logContent: null
 };
 
 /**
@@ -60,10 +60,12 @@ async function initApp() {
         
         // 初始化对话系统
         initDialogueSystem();
-        
+
         // 初始化背景音乐
         initBGM();
-        
+        initModeSwitch();
+        initLogPanel();
+
         console.log('WebGAL应用初始化完成');
     } catch (error) {
         console.error('应用初始化失败:', error);
@@ -80,6 +82,145 @@ function cacheDOM() {
     DOM.dialogue = document.getElementById('dialogue');
     DOM.userInput = document.getElementById('user-input');
     DOM.submitBtn = document.getElementById('submit-btn');
+    DOM.modeIndicator = document.getElementById('mode-indicator');
+    DOM.agentTools = document.getElementById('agent-tools');
+    DOM.agentSwitch = document.getElementById('agent-switch');
+    DOM.modeLabel = document.getElementById('mode-label');
+    DOM.logBtn = document.getElementById('log-btn');
+    DOM.logPanel = document.getElementById('log-panel');
+    DOM.logCloseBtn = document.getElementById('log-close-btn');
+    DOM.logContent = document.getElementById('log-content');
+}
+
+function setAgentMode(enabled) {
+    AppState.isAgentMode = enabled;
+    if (enabled) {
+        DOM.modeIndicator.textContent = 'Agent 模式';
+        DOM.modeIndicator.className = 'mode-agent';
+        DOM.agentTools.classList.remove('hidden');
+        DOM.modeLabel.textContent = 'Agent';
+        if (DOM.agentSwitch) DOM.agentSwitch.checked = true;
+    } else {
+        DOM.modeIndicator.textContent = '普通模式';
+        DOM.modeIndicator.className = 'mode-normal';
+        DOM.agentTools.classList.add('hidden');
+        DOM.modeLabel.textContent = '普通';
+        if (DOM.agentSwitch) DOM.agentSwitch.checked = false;
+    }
+}
+
+function initModeSwitch() {
+    if (!DOM.agentSwitch) return;
+    DOM.agentSwitch.addEventListener('change', (e) => {
+        setAgentMode(e.target.checked);
+    });
+    setAgentMode(false);
+}
+
+function initLogPanel() {
+    if (!DOM.logBtn || !DOM.logPanel || !DOM.logCloseBtn) return;
+
+    DOM.logBtn.addEventListener('click', () => {
+        DOM.logPanel.classList.remove('hidden');
+        renderChatHistory();
+    });
+
+    DOM.logCloseBtn.addEventListener('click', () => {
+        DOM.logPanel.classList.add('hidden');
+    });
+
+    DOM.logPanel.addEventListener('click', (e) => {
+        if (e.target === DOM.logPanel) {
+            DOM.logPanel.classList.add('hidden');
+        }
+    });
+}
+
+function addToChatHistory(role, content) {
+    AppState.chatHistory.push({
+        role,
+        content,
+        time: new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+    });
+}
+
+function renderChatHistory() {
+    if (!DOM.logContent) return;
+
+    if (AppState.chatHistory.length === 0) {
+        DOM.logContent.innerHTML = '<p style="color: #6b8e6b; text-align: center;">暂无历史记录</p>';
+        return;
+    }
+
+    let html = '';
+    for (const item of AppState.chatHistory) {
+        const roleLabel = item.role === 'user' ? '用户' : '纳西妲';
+        html += `
+            <div class="log-item ${item.role}">
+                <div class="role">${roleLabel}</div>
+                <div class="content">${escapeHtml(item.content)}</div>
+                <div class="time">${item.time}</div>
+            </div>
+        `;
+    }
+    DOM.logContent.innerHTML = html;
+    DOM.logContent.scrollTop = DOM.logContent.scrollHeight;
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+function displayToolCalls(toolCalls) {
+    if (!toolCalls || toolCalls.length === 0) {
+        DOM.agentTools.classList.add('hidden');
+        return;
+    }
+
+    DOM.agentTools.classList.remove('hidden');
+    let html = '<h3>工具调用记录</h3><ul>';
+
+    for (const call of toolCalls) {
+        const toolName = call.tool;
+        const args = call.args || {};
+        const result = call.result || {};
+
+        let resultClass = 'tool-result';
+        let resultText = '';
+
+        if (result.success === false) {
+            resultClass += ' error';
+            resultText = result.error || '执行失败';
+        } else if (result.content) {
+            resultText = typeof result.content === 'string'
+                ? result.content.substring(0, 200)
+                : JSON.stringify(result.content).substring(0, 200);
+        } else if (result.items) {
+            resultText = `${result.items.length} 个项目`;
+        } else if (result.output) {
+            resultText = result.output.substring(0, 200);
+        } else {
+            resultText = '执行成功';
+        }
+
+        html += `
+            <li>
+                <span class="tool-name">${toolName}</span>
+                <div class="tool-result ${resultClass}">${escapeHtml(resultText)}</div>
+            </li>
+        `;
+    }
+
+    html += '</ul>';
+    DOM.agentTools.innerHTML = html;
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
 }
 
 /**
@@ -383,48 +524,47 @@ function initDialogueSystem() {
 async function handleUserInput() {
     const inputText = DOM.userInput.value.trim();
     if (!inputText) return;
-    
-    // 清空输入框并显示思考状态
+
+    addToChatHistory('user', inputText);
     DOM.userInput.value = '';
     DOM.dialogue.textContent = '思考中……';
-    
+
     try {
-        // 获取回复
-        const reply = await getAIReply(inputText);
-        
-        // 创建对话序列
-        const sequence = createDialogueSequence(reply);
-        
-        // 如果序列为空，直接显示原文本
-        if (sequence.length === 0) {
-            DOM.dialogue.textContent = reply;
-            return;
+        const agentMode = AppState.isAgentMode;
+
+        if (agentMode) {
+            const result = await handleAgentModeStream(inputText);
+            addToChatHistory('assistant', result.reply);
+        } else {
+            const data = await getAIReply(inputText, agentMode);
+            const reply = data.reply || '';
+            const toolCalls = data.tool_calls || [];
+
+            addToChatHistory('assistant', reply);
+            setAgentMode(data.mode === 'agent');
+            displayToolCalls(toolCalls);
+
+            const sequence = createDialogueSequence(reply);
+            if (sequence.length === 0) {
+                DOM.dialogue.textContent = reply;
+                return;
+            }
+
+            AppState.dialogueSequence = sequence;
+            AppState.currentSequenceIndex = 0;
+            AppState.isProcessingSequence = true;
+
+            try {
+                await preloadAllTTSAudio(sequence);
+                DOM.dialogue.textContent = '';
+                processNextSequenceItem();
+            } catch (preloadError) {
+                console.error('音频预加载过程中发生错误:', preloadError);
+                DOM.dialogue.textContent = '';
+                processNextSequenceItem();
+            }
         }
-        
-        // 设置序列状态
-        AppState.dialogueSequence = sequence;
-        AppState.currentSequenceIndex = 0;
-        AppState.isProcessingSequence = true;
-        
-        try {
-            // 等待所有序列项的TTS音频预加载完成，再开始处理序列
-            await preloadAllTTSAudio(sequence);
-                    
-            // 清空对话框
-            DOM.dialogue.textContent = '';
 
-            // 预加载完成后开始处理序列
-            processNextSequenceItem();
-        } catch (preloadError) {
-            console.error('音频预加载过程中发生错误:', preloadError);
-            // 即使预加载失败也继续处理序列
-
-            // 清空对话框
-            DOM.dialogue.textContent = '';
-
-            processNextSequenceItem();
-        }
-        
     } catch (error) {
         console.error('处理对话失败:', error);
         DOM.dialogue.textContent = '出错了，请稍后再试。';
@@ -521,25 +661,193 @@ function typewriterEffect(element, text, append = false, speed = 50) {
 /**
  * 获取AI回复
  */
-async function getAIReply(message) {
+async function getAIReply(message, agentMode) {
     try {
+        const history = AppState.chatHistory.map(item => ({
+            role: item.role,
+            content: item.content
+        }));
+
         const response = await fetch('/api/ask', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ message })
+            body: JSON.stringify({ message, agent: agentMode, history })
         });
-        
+
         if (!response.ok) {
             throw new Error(`API请求失败: ${response.status}`);
         }
-        
-        const data = await response.json();
-        return data.reply;
-        
+
+        return await response.json();
+
     } catch (error) {
         console.error('获取AI回复失败:', error);
         throw error;
     }
+}
+
+/**
+ *  Agent模式流式处理
+ */
+async function handleAgentModeStream(message) {
+    const streamState = {
+        toolCalls: [],
+        accumulatedReply: '',
+        pendingText: '',
+        hasError: false
+    };
+
+    try {
+        const history = AppState.chatHistory.map(item => ({
+            role: item.role,
+            content: item.content
+        }));
+
+        const response = await fetch('/api/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message, agent: true, history })
+        });
+
+        if (!response.ok) {
+            throw new Error(`API请求失败: ${response.status}`);
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        setAgentMode(true);
+        DOM.dialogue.textContent = '';
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop();
+
+            for (const line of lines) {
+                if (!line.startsWith('data: ')) continue;
+                const data = line.slice(6);
+                if (!data.trim()) continue;
+
+                try {
+                    const event = JSON.parse(data);
+                    handleStreamEvent(event, streamState);
+                } catch (e) {
+                    console.warn('解析流事件失败:', e);
+                }
+            }
+        }
+
+        if (streamState.pendingText) {
+            DOM.dialogue.textContent += streamState.pendingText;
+        }
+
+        if (streamState.hasError) {
+            throw new Error('Agent模式处理失败');
+        }
+
+        return { reply: streamState.accumulatedReply, toolCalls: streamState.toolCalls };
+
+    } catch (error) {
+        console.error('Agent模式流式处理失败:', error);
+        throw error;
+    }
+}
+
+function handleStreamEvent(event, state) {
+    const { type, content, tool, args, tool_calls, message } = event;
+
+    if (type === 'error') {
+        console.error('流式处理错误:', message);
+        state.hasError = true;
+        DOM.dialogue.textContent = `\n[错误: ${message}]`;
+        return;
+    }
+
+    if (type === 'partial') {
+        state.accumulatedReply = content;
+        state.pendingText = '';
+        DOM.dialogue.textContent = content;
+        processContentWithEmotionsForElement(content);
+    }
+
+    if (type === 'final') {
+        state.accumulatedReply = content;
+    }
+
+    if (type === 'tool_call') {
+        state.toolCalls.push({ tool, args, result: {} });
+        updateToolCallDisplay(state.toolCalls);
+    }
+
+    if (type === 'done') {
+        updateToolCallDisplay(tool_calls || state.toolCalls);
+        const finalText = state.accumulatedReply;
+        if (finalText) {
+            const sequence = createDialogueSequence(finalText);
+            if (sequence.length > 0) {
+                AppState.dialogueSequence = sequence;
+                AppState.currentSequenceIndex = 0;
+                AppState.isProcessingSequence = true;
+                DOM.dialogue.textContent = '';
+                preloadAllTTSAudio(sequence).then(() => {
+                    processNextSequenceItem();
+                }).catch(err => {
+                    console.error('TTS预加载失败:', err);
+                    processNextSequenceItem();
+                });
+            }
+        }
+    }
+}
+
+function processContentWithEmotionsForElement(text) {
+    const emotionRegex = /\[([^\]]+)\]/g;
+    let match;
+    while ((match = emotionRegex.exec(text)) !== null) {
+        applyExpression(match[1]);
+    }
+}
+
+function processContentWithEmotions(text, pending) {
+    const fullText = pending + text;
+    const emotionRegex = /\[([^\]]+)\]/g;
+    let lastIndex = 0;
+    let match;
+    let display = '';
+    let pendingText = '';
+
+    while ((match = emotionRegex.exec(fullText)) !== null) {
+        if (match.index > lastIndex) {
+            display += fullText.slice(lastIndex, match.index);
+        }
+        applyExpression(match[1]);
+        lastIndex = emotionRegex.lastIndex;
+    }
+
+    if (lastIndex < fullText.length) {
+        const remaining = fullText.slice(lastIndex);
+        const openBracket = remaining.lastIndexOf('[');
+        if (openBracket !== -1 && !remaining.includes(']')) {
+            display += remaining.slice(0, openBracket);
+            pendingText = remaining.slice(openBracket);
+        } else {
+            display += remaining;
+            pendingText = '';
+        }
+    } else {
+        pendingText = '';
+    }
+
+    return { display, pending: pendingText };
+}
+
+function updateToolCallDisplay(toolCalls) {
+    displayToolCalls(toolCalls);
 }
 
 /**

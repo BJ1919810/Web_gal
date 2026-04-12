@@ -12,7 +12,15 @@
 </head>
 <body>
     <div id="game">
-        <!-- 语音播放器 -->
+        <div id="mode-indicator" class="mode-normal">普通模式</div>
+        <div id="mode-toggle">
+            <span id="mode-label">Agent</span>
+            <label class="switch">
+                <input type="checkbox" id="agent-switch">
+                <span class="slider"></span>
+            </label>
+        </div>
+        <div id="agent-tools" class="hidden"></div>
         <audio id="voice-player" hidden></audio>
         <img id="background" src="/static/images/bg.jpg" alt="background">
         <div id="live2d-container">
@@ -25,6 +33,20 @@
         <div id="input-area">
             <input type="text" id="user-input" placeholder="请输入内容..." />
             <button id="submit-btn">提交</button>
+        </div>
+
+        <div id="log-btn" title="历史记录">
+            <svg viewBox="0 0 24 24" fill="currentColor">
+                <path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-5 14H7v-2h7v2zm3-4H7v-2h10v2zm0-4H7V7h10v2z"/>
+            </svg>
+        </div>
+
+        <div id="log-panel" class="hidden">
+            <div class="log-header">
+                <span>历史记录</span>
+                <button id="log-close-btn">&times;</button>
+            </div>
+            <div id="log-content"></div>
         </div>
     </div>
     <audio id="bgm" src="/static/audio/bgm.ogg" loop></audio>

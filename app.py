@@ -4,26 +4,23 @@ import asyncio
 import io
 import json
 import os
-import re
-import threading
-import time
 import wave
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import librosa
 import numpy as np
 import requests
 import websockets
 from dotenv import load_dotenv
-from flask import Flask, Response, jsonify, render_template, request, send_from_directory
+from flask import Flask, jsonify, render_template, request, send_file, send_from_directory, Response, stream_with_context
 
 load_dotenv()
 
-from memory import get_memory_context, update_memory
-from rag import init_rag, search_context
+from tools import call_tool_function, get_tools_schema
 
 BASE_DIR = Path(__file__).resolve().parent
+WORKSPACE_DIR = BASE_DIR / "workspace"
 MODEL_DIR = BASE_DIR / "GSV" / "models"
 LIVE2D_DIR = BASE_DIR / "live2d"
 TMP_TXT_PATH = LIVE2D_DIR / "tmp.txt"
@@ -31,44 +28,52 @@ TMP_TXT_PATH = LIVE2D_DIR / "tmp.txt"
 API_URL = os.getenv("DEEPSEEK_API_URL", "https://api.deepseek.com/v1/chat/completions")
 API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 MODEL_NAME = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+AGENT_MODEL_NAME = os.getenv("DEEPSEEK_AGENT_MODEL", os.getenv("DEEPSEEK_MODEL", "deepseek-chat"))
 
-MAX_HISTORY_MESSAGES = 20
-DIALOGUE_TOP_K = 3
-KNOWLEDGE_TOP_K = 4
+MAX_TOOL_CALLS = 10
 
-BASE_SYSTEM_PROMPT = (
+AGENT_SYSTEM_PROMPT = (
     "你将扮演《原神》中的纳西妲。"
     "在输出时，你必须在每一句带有情感色彩的句子前添加情感或动作标签，例如："
-    "“[星星]探寻未知的旅人哟，[祈祷]愿繁花与叶铺就你冒险的前路。”"
+    "[星星]探寻未知的旅人哟，[祈祷]愿繁花与叶铺就你冒险的前路。"
     "如果没有情感色彩，你可以省略标签。"
     "标签一共有祈祷、发光、翻花绳、好奇、泪、脸黑、脸红、生气、星星等九种，"
     "一定不要输出没有列出的标签！"
-    "当知识库提供了相关的故事或背景信息时，请详细描述，展开叙述，不要只输出简短的几句话。"
+    "\n\n"
+    "你可以通过工具来帮助用户完成各种任务。默认工作目录是 'workspace' 目录。"
+    "\n\n"
+    "可用工具：\n"
+    "- read_file(path): 读取文件内容\n"
+    "- write_file(path, content, append?): 写入或创建文件\n"
+    "- delete_file(path): 删除文件或目录\n"
+    "- list_directory(path?): 列出目录内容\n"
+    "- search_files(directory?, pattern?, file_pattern?): 搜索文件内容\n"
+    "- rag_search(query, search_type?): 搜索RAG知识库和对话历史\n"
+    "- execute_command(command): 执行系统命令（受限安全命令）\n\n"
+    "安全规则：\n"
+    "- 禁止访问 workspace 目录以外的文件\n"
+    "- 危险命令（rm, del, format 等）会被拦截\n"
+    "- 只使用读取信息或操作 workspace 内文件的命令\n"
+    "- 如果用户要求访问其他目录，先询问用户\n\n"
+    "工作流程：\n"
+    "1. 理解用户需求\n"
+    "2. 选择合适的工具\n"
+    "3. 执行工具并获取结果\n"
+    "4. 根据结果决定下一步操作\n"
+    "5. 完成任务后给出总结\n\n"
+    "如果需要执行多条命令或读取多个文件来完成一个任务，请逐步进行，每步后思考下一步该做什么。"
 )
 
-GREETING_TERMS = {
-    "你好", "您好", "嗨", "哈喽", "hello", "hi", "嘿", "早上好", "中午好", "下午好", "晚上好",
-    "安安", "在吗", "在嘛", "又见面啦", "又见面了", "晚安", "早安",
-}
-SOCIAL_SHORT_TERMS = {
-    "谢谢", "多谢", "辛苦了", "好的", "好耶", "哈哈", "哈哈哈", "嗯", "嗯嗯", "好哦", "收到",
-    "我来了", "想你了", "抱抱", "贴贴",
-}
-DIALOGUE_CUES = (
-    "又见面", "还记得", "上次", "之前", "刚才", "你说过", "我们聊到", "我们刚聊过", "还认识我", "我是",
+NORMAL_SYSTEM_PROMPT = (
+    "你将扮演《原神》中的纳西妲。"
+    "在输出时，你必须在每一句带有情感色彩的句子前添加情感或动作标签，例如："
+    "[星星]探寻未知的旅人哟，[祈祷]愿繁花与叶铺就你冒险的前路。"
+    "如果没有情感色彩，你可以省略标签。"
+    "标签一共有祈祷、发光、翻花绳、好奇、泪、脸黑、脸红、生气、星星等九种，"
+    "一定不要输出没有列出的标签！"
 )
-KNOWLEDGE_VERBS = (
-    "关于", "是什么", "什么意思", "为什么", "怎么", "怎么办", "如何", "怎么样", "怎么了", "近况", "背景",
-    "故事", "设定", "关系", "原因", "经过", "发生了什么", "谁是", "哪位", "介绍", "讲讲", "说说",
-)
-KNOWLEDGE_ENTITIES = (
-    "纳西妲", "须弥", "迪娜泽黛", "花神诞日", "教令院", "流浪者", "阿佩普", "大慈树王", "魔鳞病",
-    "提瓦特", "旅行者", "赤王", "世界树", "净善宫",
-)
-QUESTION_WORDS = ("什么", "为什么", "怎么", "如何", "谁", "哪", "吗", "呢", "？", "?")
 
 app = Flask(__name__)
-history = [{"role": "system", "content": BASE_SYSTEM_PROMPT}]
 
 
 def _find_first_file(directory: Path, suffix: str) -> Optional[str]:
@@ -79,6 +84,11 @@ def _find_first_file(directory: Path, suffix: str) -> Optional[str]:
 
 
 REF_AUDIO = _find_first_file(MODEL_DIR, ".wav")
+
+
+@app.route("/live2d_assets/<path:path>")
+def serve_live2d_assets(path):
+    return send_from_directory(str(LIVE2D_DIR / "dist" / "assets"), path)
 
 
 def build_tts_payload(text: str) -> Dict:
@@ -128,21 +138,17 @@ async def get_tts_audio_data_async(text: str):
                     data = await asyncio.wait_for(websocket.recv(), timeout=15.0)
                 except asyncio.TimeoutError:
                     break
-
                 if isinstance(data, bytes):
                     audio_data.extend(data)
                     continue
-
                 try:
                     message = json.loads(data)
                 except json.JSONDecodeError:
                     continue
-
                 if message.get("status") == "END_OF_TRANSMISSION":
                     break
 
         if not audio_data:
-            print("[TTS] 未收到音频数据")
             return None
 
         wav_buffer = io.BytesIO()
@@ -181,204 +187,224 @@ def _normalize_audio(audio_data: bytes):
     x = x / max(np.max(x), 1e-8)
     x = np.log(x + 1e-10) + 1
     x = x / max(np.max(x), 1e-8)
-    x = x * 1.2
-    return x, sr
+    return x
 
 
-def process_audio_for_mouth_shape(audio_data: bytes):
+def process_audio_for_mouth_shape(audio_data: bytes) -> Optional[Dict[str, Any]]:
     try:
-        x, sr = _normalize_audio(audio_data)
-        duration = len(x) / sr
-        sample_interval = max(int(sr / 30), 1)
-        mouth_shape_data = []
-        for i in range(0, len(x), sample_interval):
-            segment = x[i: i + sample_interval]
-            value = float(max(np.max(segment), 0)) if len(segment) else 0.0
-            mouth_shape_data.append(value)
-        return {"duration": float(duration), "mouth_shape_data": mouth_shape_data}
+        normalized = _normalize_audio(audio_data)
+        frame_count = len(normalized)
+        window_size = int(8000 * 0.05)
+        hop_size = window_size // 4
+        energy: List[float] = []
+        for i in range(0, frame_count - window_size, hop_size):
+            window = normalized[i : i + window_size]
+            frame_energy = float(np.sqrt(np.mean(window ** 2)))
+            energy.append(frame_energy)
+        if not energy:
+            return None
+        max_energy = max(energy)
+        if max_energy > 0:
+            energy = [e / max_energy for e in energy]
+        mouth_shapes = []
+        for e in energy:
+            if e < 0.1:
+                mouth_shapes.append(0.0)
+            elif e < 0.3:
+                mouth_shapes.append(0.3)
+            elif e < 0.5:
+                mouth_shapes.append(0.6)
+            elif e < 0.7:
+                mouth_shapes.append(0.8)
+            else:
+                mouth_shapes.append(1.0)
+        return {
+            "duration": len(normalized) / 8000,
+            "mouth_shapes": mouth_shapes,
+        }
     except Exception as exc:
-        print(f"[Live2D] 音频处理失败: {exc}")
+        print(f"[Audio] 处理音频失败: {exc}")
         return None
 
 
-def play_audio_and_update_mouth(audio_data: bytes):
-    try:
-        x, _ = _normalize_audio(audio_data)
-        start_time = time.time()
-        for _ in range(int(len(x) / 800)):
-            current_idx = int((time.time() - start_time) * 8000) + 1
-            if 0 <= current_idx < len(x):
-                TMP_TXT_PATH.write_text(str(float(max(0, x[current_idx]))), encoding="utf-8")
-            time.sleep(0.1)
-    except Exception as exc:
-        print(f"[Live2D] 更新嘴型失败: {exc}")
-    finally:
-        TMP_TXT_PATH.write_text("0", encoding="utf-8")
-
-
-def _chat_completion(messages: List[Dict[str, str]], *, temperature: float = 0.2, max_tokens: Optional[int] = None) -> str:
+def _chat_completion(
+    messages: List[Dict[str, Any]],
+    model: Optional[str] = None,
+    temperature: float = 1.0,
+    max_tokens: Optional[int] = None,
+) -> str:
     if not API_KEY:
-        raise RuntimeError("未设置 DEEPSEEK_API_KEY")
-    payload = {
-        "model": MODEL_NAME,
+        raise ValueError("API密钥未设置")
+    headers = {
+        "Authorization": f"Bearer {API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload: Dict[str, Any] = {
+        "model": model or MODEL_NAME,
         "messages": messages,
         "temperature": temperature,
     }
     if max_tokens is not None:
         payload["max_tokens"] = max_tokens
+    response = requests.post(API_URL, headers=headers, json=payload, timeout=120)
+    if not response.ok:
+        raise Exception(f"API请求失败: {response.status_code} {response.text}")
+    data = response.json()
+    if "error" in data:
+        raise Exception(f"API错误: {data['error']}")
+    choices = data.get("choices", [])
+    if not choices:
+        raise Exception("API返回空 choices")
+    return choices[0].get("message", {}).get("content", "")
+
+
+def _agent_chat_completion(
+    messages: List[Dict[str, Any]],
+    tools: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    if not API_KEY:
+        raise ValueError("API密钥未设置")
     headers = {
         "Authorization": f"Bearer {API_KEY}",
         "Content-Type": "application/json",
     }
-    response = requests.post(API_URL, headers=headers, json=payload, timeout=60)
-    response.raise_for_status()
-    result = response.json()
-    return result.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+    payload = {
+        "model": AGENT_MODEL_NAME,
+        "messages": messages,
+        "tools": tools,
+        "temperature": 0.7,
+    }
+    response = requests.post(API_URL, headers=headers, json=payload, timeout=120)
+    if not response.ok:
+        raise Exception(f"API请求失败: {response.status_code} {response.text}")
+    data = response.json()
+    if "error" in data:
+        raise Exception(f"API错误: {data['error']}")
+    choices = data.get("choices", [])
+    if not choices:
+        raise Exception("API返回空 choices")
+    message = choices[0].get("message", {})
+    messages.append(message)
+    return messages, message.get("tool_calls", [])
 
 
-def call_chat_api(messages: List[Dict[str, str]]) -> str:
-    result = _chat_completion(messages, temperature=0.7)
-    return result or "出错了，请稍后再试。"
-
-
-def _normalize_route_text(text: str) -> str:
-    text = text.strip().lower()
-    text = re.sub(r"\s+", "", text)
-    return text
-
-
-def _looks_like_pure_greeting(text: str) -> bool:
-    normalized = _normalize_route_text(text)
-    normalized = re.sub(r"[~～!！,.，。…]+", "", normalized)
-    if not normalized:
-        return False
-    if normalized in GREETING_TERMS or normalized in SOCIAL_SHORT_TERMS:
-        return True
-    found_parts = re.findall(r"你好|您好|嗨|哈喽|hello|hi|嘿|早上好|中午好|下午好|晚上好|在吗|在嘛|又见面啦|又见面了|晚安|早安|呀|啊|啦|呢|哦|哟", normalized)
-    if found_parts and all(part in GREETING_TERMS or part in {"呀", "啊", "啦", "呢", "哦", "哟"} for part in found_parts):
-        return True
-    return False
-
-
-def _has_knowledge_signal(text: str) -> bool:
-    normalized = _normalize_route_text(text)
-    if any(term in normalized for term in KNOWLEDGE_VERBS):
-        return True
-    if any(mark in text for mark in QUESTION_WORDS) and any(entity in text for entity in KNOWLEDGE_ENTITIES):
-        return True
-    if any(entity in text for entity in KNOWLEDGE_ENTITIES) and any(verb in normalized for verb in ("近况", "背景", "故事", "设定", "关系", "怎么样", "怎么了", "介绍", "讲讲", "说说")):
-        return True
-    return False
-
-
-def _has_dialogue_signal(text: str) -> bool:
-    normalized = _normalize_route_text(text)
-    return any(cue in normalized for cue in DIALOGUE_CUES)
-
-
-def rule_route_context(user_input: str) -> Tuple[Optional[str], str]:
-    text = user_input.strip()
-    normalized = _normalize_route_text(text)
-    plain_len = len(normalized)
-
-    if not normalized:
-        return "none", "空输入"
-
-    if _looks_like_pure_greeting(text):
-        return "dialogue_only", "规则命中：纯寒暄/招呼"
-
-    if _has_knowledge_signal(text):
-        return "knowledge", "规则命中：明确知识/设定问题"
-
-    if _has_dialogue_signal(text) and not _has_knowledge_signal(text):
-        return "dialogue_only", "规则命中：承接旧对话"
-
-    if plain_len <= 8 and not any(mark in text for mark in "?？") and not any(entity in text for entity in KNOWLEDGE_ENTITIES):
-        return "dialogue_only", "规则命中：超短社交语句"
-
-    if plain_len <= 14 and any(term in normalized for term in SOCIAL_SHORT_TERMS) and not any(entity in text for entity in KNOWLEDGE_ENTITIES):
-        return "dialogue_only", "规则命中：短社交反馈"
-
-    return None, "灰区，交给LLM路由"
-
-
-def llm_route_context(user_input: str) -> Tuple[str, str]:
-    system_prompt = (
-        "你是一个对话路由器。你必须把用户输入分到以下三类之一：\n"
-        "1. none：不需要旧对话，也不需要知识库；\n"
-        "2. dialogue_only：需要依赖角色长期记忆与旧对话承接语气/关系，但不需要知识资料；\n"
-        "3. knowledge：需要知识库资料来回答设定、事实、背景、人物近况、事件经过等问题。\n\n"
-        "严格规则：\n"
-        "- 寒暄、打招呼、再次见面、简短情绪表达，通常是 dialogue_only，不是 knowledge。\n"
-        "- 不能因为重复出现‘你好’‘嗨’‘我们又见面了’就判成 knowledge。\n"
-        "- 只有当用户真的在问设定、背景、原因、人物近况、事件经过等信息时，才判为 knowledge。\n"
-        "- 只返回一行 JSON，例如：{\"route\":\"dialogue_only\",\"reason\":\"寒暄承接\"}"
-    )
-    user_prompt = (
-        "请判断这句用户输入属于哪一类。\n"
-        f"用户输入：{user_input}\n\n"
-        "例子：\n"
-        "- ‘你好呀，我们又见面啦’ -> dialogue_only\n"
-        "- ‘迪娜泽黛现在怎么样了’ -> knowledge\n"
-        "- ‘花神诞日为什么会轮回’ -> knowledge\n"
-        "- ‘哈哈，谢谢你’ -> dialogue_only"
-    )
-    try:
-        content = _chat_completion(
-            [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.0,
-            max_tokens=80,
-        )
-        match = re.search(r"\{.*\}", content, flags=re.S)
-        if match:
-            data = json.loads(match.group())
-            route = data.get("route", "dialogue_only")
-            if route not in {"none", "dialogue_only", "knowledge"}:
-                route = "dialogue_only"
-            return route, f"LLM路由：{data.get('reason', '').strip() or '未提供原因'}"
-    except Exception as exc:
-        print(f"[Route] LLM 路由失败: {exc}")
-    return "dialogue_only", "LLM路由失败，回退为 dialogue_only"
-
-
-def route_context(user_input: str) -> Tuple[str, str]:
-    route, reason = rule_route_context(user_input)
-    if route is not None:
-        return route, reason
-    return llm_route_context(user_input)
-
-
-def _format_retrieved_items(title: str, items: List[Dict]) -> str:
-    if not items:
-        return f"[{title}]\n- 无"
-    lines = [f"[{title}]"]
-    for idx, item in enumerate(items, start=1):
-        source = item.get("source", "unknown")
-        lines.append(f"- 来源{idx}: {source}")
-        lines.append((item.get("content") or "").strip())
-    return "\n".join(lines)
-
-
-def build_system_prompt(base_prompt: str, memory_context: str, rag_context: Dict[str, List[Dict]]) -> str:
-    parts = [
-        base_prompt,
-        "请按以下优先级使用上下文：[Agent] 是长期核心记忆，优先遵循；"
-        "[Old Dialogue] 是历史对话片段，只用于回忆用户过往信息与语境，不要把明显过时或随口一说的内容当成硬事实；"
-        "[Knowledge] 是资料库内容，用于补充设定、背景和事实。",
+def run_agent_loop_stream(user_input: str, history: List[Dict[str, str]] = None):
+    tools = get_tools_schema()
+    messages: List[Dict[str, Any]] = [
+        {"role": "system", "content": AGENT_SYSTEM_PROMPT},
     ]
-    if memory_context:
-        parts.append(f"[Agent]\n{memory_context}")
-    parts.append(_format_retrieved_items("Old Dialogue", rag_context.get("old_dialogue", [])))
-    parts.append(_format_retrieved_items("Knowledge", rag_context.get("knowledge", [])))
-    return "\n\n".join(parts)
+    if history:
+        for h in history:
+            messages.append(h)
+    messages.append({"role": "user", "content": user_input})
+
+    tool_call_history = []
+    seen_tool_calls = set()
+
+    for step in range(MAX_TOOL_CALLS):
+        messages, tool_calls = _agent_chat_completion(messages, tools=tools)
+
+        if not tool_calls:
+            break
+
+        assistant_content = messages[-1].get("content", "")
+        if assistant_content and step == 0:
+            yield {"type": "partial", "content": assistant_content}
+
+        for tool_call in tool_calls:
+            tool_id = tool_call.get("id", "")
+            if tool_id in seen_tool_calls:
+                continue
+            seen_tool_calls.add(tool_id)
+
+            func = tool_call.get("function", {})
+            tool_name = func.get("name", "")
+            try:
+                tool_args = json.loads(func.get("arguments", "{}"))
+            except json.JSONDecodeError:
+                tool_args = {}
+
+            tool_result = call_tool_function(tool_name, tool_args)
+            tool_call_history.append({
+                "tool": tool_name,
+                "args": tool_args,
+                "result": tool_result,
+            })
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tool_id,
+                "content": json.dumps(tool_result, ensure_ascii=False),
+            })
+            print(f"[Agent] 工具调用: {tool_name} | 参数: {tool_args}")
+            yield {"type": "tool_call", "tool": tool_name, "args": tool_args, "result": tool_result}
+
+    final_message = messages[-1]
+    if final_message.get("role") == "assistant":
+        yield {"type": "final", "content": final_message.get("content", "")}
+    else:
+        yield {"type": "final", "content": "处理完成，但未收到最终回复。"}
+
+    yield {"type": "done", "tool_calls": tool_call_history}
 
 
-@app.route("/live2d_assets/<path:path>")
-def serve_live2d_assets(path):
-    return send_from_directory(str(LIVE2D_DIR / "dist" / "assets"), path)
+def run_agent_loop(user_input: str) -> Tuple[str, List[Dict[str, Any]]]:
+    messages = [
+        {"role": "system", "content": AGENT_SYSTEM_PROMPT},
+        {"role": "user", "content": user_input},
+    ]
+
+    tool_call_history = []
+    seen_tool_calls = set()
+
+    for _ in range(MAX_TOOL_CALLS):
+        messages, tool_calls = _agent_chat_completion(messages, tools=get_tools_schema())
+        if not tool_calls:
+            break
+
+        for tool_call in tool_calls:
+            tool_id = tool_call.get("id", "")
+            if tool_id in seen_tool_calls:
+                continue
+            seen_tool_calls.add(tool_id)
+
+            func = tool_call.get("function", {})
+            tool_name = func.get("name", "")
+            try:
+                tool_args = json.loads(func.get("arguments", "{}"))
+            except json.JSONDecodeError:
+                tool_args = {}
+
+            tool_result = call_tool_function(tool_name, tool_args)
+            tool_call_history.append({
+                "tool": tool_name,
+                "args": tool_args,
+                "result": tool_result,
+            })
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tool_id,
+                "content": json.dumps(tool_result, ensure_ascii=False),
+            })
+            print(f"[Agent] 工具调用: {tool_name} | 参数: {tool_args}")
+
+    final_message = messages[-1]
+    if final_message.get("role") == "assistant":
+        return final_message.get("content", ""), tool_call_history
+    return "处理完成，但未收到最终回复。", tool_call_history
+
+
+def _normal_chat(user_input: str, history: List[Dict[str, str]] = None) -> str:
+    messages = [{"role": "system", "content": NORMAL_SYSTEM_PROMPT}]
+    if history:
+        for h in history:
+            messages.append(h)
+    messages.append({"role": "user", "content": user_input})
+    return _chat_completion(messages, model=MODEL_NAME, temperature=1.0)
+
+
+@app.route("/")
+def index():
+    return render_template("index.html")
 
 
 @app.route("/api/get_mouth_shape_data")
@@ -403,96 +429,91 @@ def get_mouth_y():
     return jsonify({"y": "0"})
 
 
-@app.route("/")
-def index():
-    return render_template("index.html")
+@app.route("/api/chat", methods=["POST"])
+def chat():
+    data = request.json or {}
+    user_input = data.get("message", "").strip()
+    agent_mode = data.get("agent", False)
+    history = data.get("history", [])
 
-
-@app.route("/api/ask", methods=["POST"])
-def ask():
-    user_input = (request.json or {}).get("message", "").strip()
     if not user_input:
         return jsonify({"error": "消息不能为空"}), 400
 
-    route, route_reason = route_context(user_input)
-    init_rag()
-
-    dialogue_top_k = DIALOGUE_TOP_K if route in {"dialogue_only", "knowledge"} else 0
-    knowledge_top_k = KNOWLEDGE_TOP_K if route == "knowledge" else 0
-    rag_context = search_context(
-        user_input,
-        dialogue_top_k=dialogue_top_k,
-        knowledge_top_k=knowledge_top_k,
-    )
-    memory_context = get_memory_context()
-
-    print(f"[Route] 策略: {route} | {route_reason}")
-    print(f"[RAG] 查询: {user_input}")
-    print(f"[RAG] 查询变体: {rag_context.get('query_variants', [])}")
-    for section_name, items in (("Old Dialogue", rag_context.get("old_dialogue", [])), ("Knowledge", rag_context.get("knowledge", []))):
-        print(f"[RAG] {section_name} 命中 {len(items)} 条")
-        for idx, item in enumerate(items, start=1):
-            print(
-                f"[RAG] {section_name}#{idx} source={item.get('source')} "
-                f"distance={item.get('distance')} rerank={item.get('rerank_score')}"
-            )
-
-    system_prompt = build_system_prompt(BASE_SYSTEM_PROMPT, memory_context, rag_context)
-    messages = [{"role": "system", "content": system_prompt}, *history[1:], {"role": "user", "content": user_input}]
-
-    print("\n========== 最终 Prompt ==========")
-    for message in messages:
-        print(f"\n[{message['role']}]:\n{message['content']}")
-    print("\n================================\n")
-
     try:
-        reply = call_chat_api(messages)
+        if agent_mode:
+            return Response(
+                stream_with_context(generate_agent_stream(user_input, history)),
+                mimetype="application/json"
+            )
+        else:
+            reply = _normal_chat(user_input, history)
+            mode = "normal"
+            tool_call_history = []
+
+            return jsonify({
+                "reply": reply,
+                "mode": mode,
+                "tool_calls": tool_call_history,
+            })
     except Exception as exc:
         print(f"[Chat] 请求失败: {exc}")
         return jsonify({"reply": "出错了，请稍后再试。", "error": str(exc)}), 500
 
-    print(f"[Chat] 回复: {reply}")
-    history.extend([
-        {"role": "user", "content": user_input},
-        {"role": "assistant", "content": reply},
-    ])
-    while len(history) > MAX_HISTORY_MESSAGES:
-        history.pop(1)
+
+def generate_agent_stream(user_input: str, history: List[Dict[str, str]] = None):
+    tool_call_history = []
+    accumulated_content = ""
 
     try:
-        update_memory(user_input, reply)
+        for event in run_agent_loop_stream(user_input, history):
+            event_type = event.get("type")
+
+            if event_type == "partial":
+                content = event.get("content", "")
+                accumulated_content += content
+                yield f"data: {json.dumps({'type': 'partial', 'content': content}, ensure_ascii=False)}\n\n"
+
+            elif event_type == "tool_call":
+                tool = event.get("tool", "")
+                args = event.get("args", {})
+                result = event.get("result", {})
+                tool_call_history.append({"tool": tool, "args": args, "result": result})
+                yield f"data: {json.dumps({'type': 'tool_call', 'tool': tool, 'args': args}, ensure_ascii=False)}\n\n"
+
+            elif event_type == "final":
+                content = event.get("content", "")
+                accumulated_content = content
+                yield f"data: {json.dumps({'type': 'final', 'content': content}, ensure_ascii=False)}\n\n"
+
+            elif event_type == "done":
+                final_tool_calls = event.get("tool_calls", [])
+                yield f"data: {json.dumps({'type': 'done', 'tool_calls': tool_call_history}, ensure_ascii=False)}\n\n"
+
     except Exception as exc:
-        print(f"[记忆] 写入失败: {exc}")
+        print(f"[Agent Stream] 错误: {exc}")
+        yield f"data: {json.dumps({'type': 'error', 'message': str(exc)}, ensure_ascii=False)}\n\n"
 
-    def process_tts():
-        audio_data = get_tts_audio_data(reply)
-        if audio_data:
-            play_audio_and_update_mouth(audio_data)
 
-    threading.Thread(target=process_tts, daemon=True).start()
-    return jsonify({"reply": reply, "route": route})
+@app.route("/api/ask", methods=["POST"])
+def ask():
+    return chat()
 
 
 @app.route("/api/tts", methods=["POST"])
 def tts():
-    text = (request.json or {}).get("text", "")
+    text = (request.json or {}).get("text", "").strip()
     if not text:
         return jsonify({"error": "文本不能为空"}), 400
-    text = split_say(text)
-    print(f"[TTS] 请求: {text[:50]}...")
-    try:
-        audio_data = get_tts_audio_data(text)
-        if not audio_data:
-            raise RuntimeError("TTS 服务异常")
-        print(f"[TTS] 返回音频大小: {len(audio_data)} bytes")
-        return Response(audio_data, mimetype="audio/wav")
-    except Exception as exc:
-        print(f"[TTS] 错误: {exc}")
-        return jsonify({"error": str(exc)}), 500
+    audio_data = get_tts_audio_data(text)
+    if not audio_data:
+        return jsonify({"error": "TTS服务不可用"}), 503
+    return send_file(
+        io.BytesIO(audio_data),
+        mimetype="audio/wav",
+        as_attachment=False,
+        download_name="audio.wav"
+    )
 
 
 if __name__ == "__main__":
-    LIVE2D_DIR.mkdir(exist_ok=True)
-    if not TMP_TXT_PATH.exists():
-        TMP_TXT_PATH.write_text("0", encoding="utf-8")
     app.run(host="0.0.0.0", port=5000, debug=True)

@@ -110,15 +110,3 @@ def _update_memory_md(user_input: str, ai_response: str):
             print("[记忆] MEMORY.md 已更新")
     except Exception as exc:
         print(f"[记忆] MEMORY.md 更新失败: {exc}")
-
-
-def update_memory(user_input: str, ai_response: str):
-    ensure_memory_file()
-    _append_daily_log(user_input, ai_response)
-    _update_memory_md(user_input, ai_response)
-
-
-def clear_memory():
-    ensure_memory_file()
-    MEMORY_MD_PATH.write_text(DEFAULT_MEMORY_MD, encoding="utf-8")
-    return "核心记忆已清除"
