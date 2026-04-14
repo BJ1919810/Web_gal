@@ -87,15 +87,25 @@ Click the book icon in the bottom-right corner to open the history panel and vie
 - **Blacklist Mechanism**: Dangerous commands (like rm, del, format, etc.) are blocked
 - **Whitelist Mechanism**: Only predefined read-only commands are allowed
 
-### Streaming Response
-- **Real-time Display**: Agent mode intermediate results displayed in dialogue box in real-time
-- **Typewriter Effect**: Final response uses typewriter effect, combined with TTS playback
-- **Expression Actions**: Streaming content correctly parsed and triggers expression actions
+### TTS Streaming (Important)
+- **No longer pre-loading all audio**, changed to segment-by-segment background preloading
+- `prepareNextAudio(index)`: Preloads 3 segments starting from current position in background
+- `processNextSequenceItem()`: Sends next TTS request in parallel while playing current segment
+- **Expression synced with first character**: Expression triggers when first character appears, not after "思考中..."
+- **Timeout/failure handling**: `ttsFailedTexts` Set records failed texts, display text without voice
+- **Text length limit**: Backend limits 500 characters, returns error if exceeded
+- TTS service address: `ws://127.0.0.1:9880`
+
+### Dialogue Sequence Segmentation
+- Segmentation by **emotion tags `[xxx]`**, new segment starts when encountering a new tag
+- Valid tags: `祈祷`(pray), `发光`(glow), `翻花绳`(jumprope), `好奇`(curious), `泪`(tears), `脸黑`(dark face), `脸红`(blush), `生气`(angry), `星星`(stars)
+- Invalid tags are displayed as plain text
 
 ### RAG System
 - **Retrieval Engine**: Uses ChromaDB to store and retrieve dialogue history and knowledge base
 - **Query Processing**: Supports query expansion, generating multiple variants to improve retrieval coverage
 - **Reranking**: Uses BGE Reranker to rerank retrieval results
+- **GPU Memory**: Automatically unloads embedding/reranker models after Agent session ends to free VRAM
 
 ## Notes
 

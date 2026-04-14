@@ -126,6 +126,23 @@ class RAGSystem:
                 self.build_index()
         self.initialized = True
 
+    def unload_models(self):
+        if self.embedding_model is not None:
+            del self.embedding_model
+            self.embedding_model = None
+            print("[RAG] 卸载 embedding 模型")
+        if self.reranker is not None:
+            del self.reranker
+            self.reranker = None
+            print("[RAG] 卸载 reranker 模型")
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                print("[RAG] 清理 CUDA 缓存")
+        except Exception:
+            pass
+
     @staticmethod
     def split_sentences(text: str) -> List[str]:
         parts = re.split(r"(?<=[。！？!?])|\n+", text)
@@ -323,3 +340,7 @@ def search_context(query: str, dialogue_top_k: int = 3, knowledge_top_k: int = 4
 
 def search_knowledge(query: str, top_k: int = 7):
     return rag_system.search_knowledge(query, top_k=top_k)
+
+
+def unload_rag():
+    rag_system.unload_models()

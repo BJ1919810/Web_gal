@@ -225,13 +225,13 @@ def execute_command(command: str, working_dir: Optional[str] = None) -> Dict[str
 TOOLS = {
     "read_file": {
         "name": "read_file",
-        "description": "读取文件内容。如果要查看代码、文档、配置文件或任何文本内容，使用此工具。路径相对于 workspace 目录。",
+        "description": "读取文件内容",
         "parameters": {
             "type": "object",
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "文件路径，相对于 workspace 目录。例如：'notes.txt' 或 'docs/readme.md'",
+                    "description": "文件路径，相对于 workspace",
                 }
             },
             "required": ["path"],
@@ -239,13 +239,13 @@ TOOLS = {
     },
     "write_file": {
         "name": "write_file",
-        "description": "写入或创建文件。如果要保存代码、笔记、文档或任何内容到文件，使用此工具。会自动创建父目录。",
+        "description": "创建或写入文件，自动创建父目录",
         "parameters": {
             "type": "object",
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "文件路径，相对于 workspace 目录。例如：'notes.txt' 或 'project/main.py'",
+                    "description": "文件路径，相对于 workspace",
                 },
                 "content": {
                     "type": "string",
@@ -253,7 +253,7 @@ TOOLS = {
                 },
                 "append": {
                     "type": "boolean",
-                    "description": "如果为 true，则追加到文件末尾；否则覆盖文件",
+                    "description": "追加模式，否则覆盖",
                     "default": False,
                 },
             },
@@ -262,13 +262,13 @@ TOOLS = {
     },
     "delete_file": {
         "name": "delete_file",
-        "description": "删除文件或目录。使用前请确认路径正确，删除后无法恢复。",
+        "description": "删除文件或目录，删除后无法恢复",
         "parameters": {
             "type": "object",
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "要删除的文件或目录路径，相对于 workspace 目录",
+                    "description": "文件或目录路径，相对于 workspace",
                 },
             },
             "required": ["path"],
@@ -276,13 +276,13 @@ TOOLS = {
     },
     "list_directory": {
         "name": "list_directory",
-        "description": "列出目录内容。查看 workspace 中有哪些文件和文件夹。",
+        "description": "列出目录内容",
         "parameters": {
             "type": "object",
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "目录路径，相对于 workspace 目录。默认为根目录 '.'",
+                    "description": "目录路径，相对于 workspace，默认为根目录",
                     "default": ".",
                 },
             },
@@ -290,22 +290,22 @@ TOOLS = {
     },
     "search_files": {
         "name": "search_files",
-        "description": "在目录中搜索文件或内容。",
+        "description": "搜索文件或内容，支持正则表达式",
         "parameters": {
             "type": "object",
             "properties": {
                 "directory": {
                     "type": "string",
-                    "description": "要搜索的目录，相对于 workspace 目录",
+                    "description": "搜索目录，相对于 workspace",
                     "default": ".",
                 },
                 "pattern": {
                     "type": "string",
-                    "description": "要搜索的文本内容（正则表达式）。如果留空，则只列出匹配 file_pattern 的文件",
+                    "description": "搜索内容（正则表达式），留空则只按 file_pattern 过滤",
                 },
                 "file_pattern": {
                     "type": "string",
-                    "description": "文件名匹配模式，例如 '*.py' 或 '*.txt'",
+                    "description": "文件名匹配模式，如 '*.py'",
                     "default": "*",
                 },
             },
@@ -313,17 +313,17 @@ TOOLS = {
     },
     "rag_search": {
         "name": "rag_search",
-        "description": "搜索RAG知识库和对话历史。当用户询问关于纳西妲、须弥、知识库相关设定、背景故事，或需要回顾之前的对话内容时使用。",
+        "description": "搜索知识库和对话历史",
         "parameters": {
             "type": "object",
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "搜索查询词",
+                    "description": "搜索查询",
                 },
                 "search_type": {
                     "type": "string",
-                    "description": "搜索类型：'all' 搜索全部，'knowledge' 只搜索知识库，'dialogue' 只搜索对话历史",
+                    "description": "搜索范围：all/knowledge/dialogue",
                     "enum": ["all", "knowledge", "dialogue"],
                     "default": "all",
                 },
@@ -333,7 +333,7 @@ TOOLS = {
     },
     "execute_command": {
         "name": "execute_command",
-        "description": "执行系统命令。仅可用于查看信息、搜索文件、读取内容等只读操作。所有删除、格式化等危险操作已被拦截。",
+        "description": "执行系统命令，仅限只读操作（危险操作已被拦截）",
         "parameters": {
             "type": "object",
             "properties": {
@@ -343,7 +343,7 @@ TOOLS = {
                 },
                 "working_dir": {
                     "type": "string",
-                    "description": "命令执行的工作目录，默认为 workspace 目录",
+                    "description": "工作目录，默认为 workspace",
                 },
             },
             "required": ["command"],

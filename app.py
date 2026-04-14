@@ -18,6 +18,7 @@ from flask import Flask, jsonify, render_template, request, send_file, send_from
 load_dotenv()
 
 from tools import call_tool_function, get_tools_schema
+from rag import unload_rag
 
 BASE_DIR = Path(__file__).resolve().parent
 WORKSPACE_DIR = BASE_DIR / "workspace"
@@ -33,44 +34,19 @@ AGENT_MODEL_NAME = os.getenv("DEEPSEEK_AGENT_MODEL", os.getenv("DEEPSEEK_MODEL",
 MAX_TOOL_CALLS = 10
 
 AGENT_SYSTEM_PROMPT = (
-    "你将扮演《原神》中的纳西妲。"
-    "在输出时，你必须在每一句带有情感色彩的句子前添加情感或动作标签，例如："
-    "[星星]探寻未知的旅人哟，[祈祷]愿繁花与叶铺就你冒险的前路。"
-    "如果没有情感色彩，你可以省略标签。"
-    "标签一共有祈祷、发光、翻花绳、好奇、泪、脸黑、脸红、生气、星星等九种，"
-    "一定不要输出没有列出的标签！"
-    "\n\n"
-    "你可以通过工具来帮助用户完成各种任务。默认工作目录是 'workspace' 目录。"
-    "\n\n"
-    "可用工具：\n"
-    "- read_file(path): 读取文件内容\n"
-    "- write_file(path, content, append?): 写入或创建文件\n"
-    "- delete_file(path): 删除文件或目录\n"
-    "- list_directory(path?): 列出目录内容\n"
-    "- search_files(directory?, pattern?, file_pattern?): 搜索文件内容\n"
-    "- rag_search(query, search_type?): 搜索RAG知识库和对话历史\n"
-    "- execute_command(command): 执行系统命令（受限安全命令）\n\n"
-    "安全规则：\n"
-    "- 禁止访问 workspace 目录以外的文件\n"
-    "- 危险命令（rm, del, format 等）会被拦截\n"
-    "- 只使用读取信息或操作 workspace 内文件的命令\n"
-    "- 如果用户要求访问其他目录，先询问用户\n\n"
-    "工作流程：\n"
-    "1. 理解用户需求\n"
-    "2. 选择合适的工具\n"
-    "3. 执行工具并获取结果\n"
-    "4. 根据结果决定下一步操作\n"
-    "5. 完成任务后给出总结\n\n"
-    "如果需要执行多条命令或读取多个文件来完成一个任务，请逐步进行，每步后思考下一步该做什么。"
+    "你将扮演《原神》中的纳西妲。回复时在情感语句前加标签，如[星星]、[好奇]。"
+    "标签：祈祷、发光、翻花绳、好奇、泪、脸黑、脸红、生气、星星。\n\n"
+
+    "你可以通过工具帮助用户，默认工作目录为 'workspace'。\n"
+    "规则：禁止访问workspace外文件；危险命令被拦截；先询问再操作其他目录。\n\n"
+    
+    "流程：理解需求→直接调用工具→填入参数→执行→根据结果决定下一步操作→（重复直到完成任务）→简要总结。"
+    "多步任务请逐步进行。"
 )
 
 NORMAL_SYSTEM_PROMPT = (
-    "你将扮演《原神》中的纳西妲。"
-    "在输出时，你必须在每一句带有情感色彩的句子前添加情感或动作标签，例如："
-    "[星星]探寻未知的旅人哟，[祈祷]愿繁花与叶铺就你冒险的前路。"
-    "如果没有情感色彩，你可以省略标签。"
-    "标签一共有祈祷、发光、翻花绳、好奇、泪、脸黑、脸红、生气、星星等九种，"
-    "一定不要输出没有列出的标签！"
+    "你将扮演《原神》中的纳西妲。回复时在情感语句前加标签，如[星星]、[好奇]。"
+    "标签：祈祷、发光、翻花绳、好奇、泪、脸黑、脸红、生气、星星。"
 )
 
 app = Flask(__name__)
@@ -131,12 +107,13 @@ async def get_tts_audio_data_async(text: str):
         payload = build_tts_payload(clean_text)
         audio_data = bytearray()
 
-        async with websockets.connect("ws://127.0.0.1:9880") as websocket:
+        async with websockets.connect("ws://127.0.0.1:9880", max_size=50*1024*1024) as websocket:
             await websocket.send(json.dumps(payload))
             while True:
                 try:
-                    data = await asyncio.wait_for(websocket.recv(), timeout=15.0)
+                    data = await asyncio.wait_for(websocket.recv(), timeout=60.0)
                 except asyncio.TimeoutError:
+                    print("[TTS] WebSocket 接收超时")
                     break
                 if isinstance(data, bytes):
                     audio_data.extend(data)
@@ -232,7 +209,7 @@ def _chat_completion(
     model: Optional[str] = None,
     temperature: float = 1.0,
     max_tokens: Optional[int] = None,
-) -> str:
+) -> Tuple[str, Dict[str, int]]:
     if not API_KEY:
         raise ValueError("API密钥未设置")
     headers = {
@@ -255,25 +232,27 @@ def _chat_completion(
     choices = data.get("choices", [])
     if not choices:
         raise Exception("API返回空 choices")
-    return choices[0].get("message", {}).get("content", "")
+    usage = data.get("usage", {})
+    return choices[0].get("message", {}).get("content", ""), usage
 
 
 def _agent_chat_completion(
     messages: List[Dict[str, Any]],
-    tools: List[Dict[str, Any]],
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    tools: Optional[List[Dict[str, Any]]] = None,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, int]]:
     if not API_KEY:
         raise ValueError("API密钥未设置")
     headers = {
         "Authorization": f"Bearer {API_KEY}",
         "Content-Type": "application/json",
     }
-    payload = {
+    payload: Dict[str, Any] = {
         "model": AGENT_MODEL_NAME,
         "messages": messages,
-        "tools": tools,
         "temperature": 0.7,
     }
+    if tools:
+        payload["tools"] = tools
     response = requests.post(API_URL, headers=headers, json=payload, timeout=120)
     if not response.ok:
         raise Exception(f"API请求失败: {response.status_code} {response.text}")
@@ -285,11 +264,11 @@ def _agent_chat_completion(
         raise Exception("API返回空 choices")
     message = choices[0].get("message", {})
     messages.append(message)
-    return messages, message.get("tool_calls", [])
+    usage = data.get("usage", {})
+    return messages, message.get("tool_calls", []), usage
 
 
 def run_agent_loop_stream(user_input: str, history: List[Dict[str, str]] = None):
-    tools = get_tools_schema()
     messages: List[Dict[str, Any]] = [
         {"role": "system", "content": AGENT_SYSTEM_PROMPT},
     ]
@@ -300,16 +279,22 @@ def run_agent_loop_stream(user_input: str, history: List[Dict[str, str]] = None)
 
     tool_call_history = []
     seen_tool_calls = set()
+    total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
-    for step in range(MAX_TOOL_CALLS):
-        messages, tool_calls = _agent_chat_completion(messages, tools=tools)
+    step = 0
+    while step < MAX_TOOL_CALLS:
+        messages, tool_calls, usage = _agent_chat_completion(messages, tools=get_tools_schema())
+
+        for k in total_usage:
+            total_usage[k] += usage.get(k, 0)
+
+        current_msg = messages[-1]
+        partial_text = current_msg.get("content", "")
+        if partial_text:
+            yield {"type": "partial", "content": partial_text}
 
         if not tool_calls:
             break
-
-        assistant_content = messages[-1].get("content", "")
-        if assistant_content and step == 0:
-            yield {"type": "partial", "content": assistant_content}
 
         for tool_call in tool_calls:
             tool_id = tool_call.get("id", "")
@@ -338,68 +323,25 @@ def run_agent_loop_stream(user_input: str, history: List[Dict[str, str]] = None)
             print(f"[Agent] 工具调用: {tool_name} | 参数: {tool_args}")
             yield {"type": "tool_call", "tool": tool_name, "args": tool_args, "result": tool_result}
 
+        step += 1
+
     final_message = messages[-1]
     if final_message.get("role") == "assistant":
         yield {"type": "final", "content": final_message.get("content", "")}
     else:
         yield {"type": "final", "content": "处理完成，但未收到最终回复。"}
 
-    yield {"type": "done", "tool_calls": tool_call_history}
+    yield {"type": "done", "tool_calls": tool_call_history, "usage": total_usage}
 
 
-def run_agent_loop(user_input: str) -> Tuple[str, List[Dict[str, Any]]]:
-    messages = [
-        {"role": "system", "content": AGENT_SYSTEM_PROMPT},
-        {"role": "user", "content": user_input},
-    ]
-
-    tool_call_history = []
-    seen_tool_calls = set()
-
-    for _ in range(MAX_TOOL_CALLS):
-        messages, tool_calls = _agent_chat_completion(messages, tools=get_tools_schema())
-        if not tool_calls:
-            break
-
-        for tool_call in tool_calls:
-            tool_id = tool_call.get("id", "")
-            if tool_id in seen_tool_calls:
-                continue
-            seen_tool_calls.add(tool_id)
-
-            func = tool_call.get("function", {})
-            tool_name = func.get("name", "")
-            try:
-                tool_args = json.loads(func.get("arguments", "{}"))
-            except json.JSONDecodeError:
-                tool_args = {}
-
-            tool_result = call_tool_function(tool_name, tool_args)
-            tool_call_history.append({
-                "tool": tool_name,
-                "args": tool_args,
-                "result": tool_result,
-            })
-            messages.append({
-                "role": "tool",
-                "tool_call_id": tool_id,
-                "content": json.dumps(tool_result, ensure_ascii=False),
-            })
-            print(f"[Agent] 工具调用: {tool_name} | 参数: {tool_args}")
-
-    final_message = messages[-1]
-    if final_message.get("role") == "assistant":
-        return final_message.get("content", ""), tool_call_history
-    return "处理完成，但未收到最终回复。", tool_call_history
-
-
-def _normal_chat(user_input: str, history: List[Dict[str, str]] = None) -> str:
+def _normal_chat(user_input: str, history: List[Dict[str, str]] = None) -> Tuple[str, Dict[str, int]]:
     messages = [{"role": "system", "content": NORMAL_SYSTEM_PROMPT}]
     if history:
         for h in history:
             messages.append(h)
     messages.append({"role": "user", "content": user_input})
-    return _chat_completion(messages, model=MODEL_NAME, temperature=1.0)
+    reply, usage = _chat_completion(messages, model=MODEL_NAME, temperature=1.0)
+    return reply, usage
 
 
 @app.route("/")
@@ -446,7 +388,7 @@ def chat():
                 mimetype="application/json"
             )
         else:
-            reply = _normal_chat(user_input, history)
+            reply, usage = _normal_chat(user_input, history)
             mode = "normal"
             tool_call_history = []
 
@@ -454,6 +396,7 @@ def chat():
                 "reply": reply,
                 "mode": mode,
                 "tool_calls": tool_call_history,
+                "usage": usage,
             })
     except Exception as exc:
         print(f"[Chat] 请求失败: {exc}")
@@ -486,11 +429,13 @@ def generate_agent_stream(user_input: str, history: List[Dict[str, str]] = None)
                 yield f"data: {json.dumps({'type': 'final', 'content': content}, ensure_ascii=False)}\n\n"
 
             elif event_type == "done":
-                final_tool_calls = event.get("tool_calls", [])
-                yield f"data: {json.dumps({'type': 'done', 'tool_calls': tool_call_history}, ensure_ascii=False)}\n\n"
+                final_usage = event.get("usage", {})
+                unload_rag()
+                yield f"data: {json.dumps({'type': 'done', 'tool_calls': tool_call_history, 'usage': final_usage}, ensure_ascii=False)}\n\n"
 
     except Exception as exc:
         print(f"[Agent Stream] 错误: {exc}")
+        unload_rag()
         yield f"data: {json.dumps({'type': 'error', 'message': str(exc)}, ensure_ascii=False)}\n\n"
 
 
@@ -504,6 +449,8 @@ def tts():
     text = (request.json or {}).get("text", "").strip()
     if not text:
         return jsonify({"error": "文本不能为空"}), 400
+    if len(text) > 500:
+        return jsonify({"error": "文本过长，请分段处理"}), 400
     audio_data = get_tts_audio_data(text)
     if not audio_data:
         return jsonify({"error": "TTS服务不可用"}), 503

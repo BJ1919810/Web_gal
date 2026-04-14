@@ -17,6 +17,8 @@ const AppState = {
     currentSequenceIndex: 0,
     dialogueSequence: [],
     ttsAudioCache: new Map(),
+    ttsFailedTexts: new Set(),
+    isWaitingForAudio: false,
     isAgentMode: false,
     currentToolCalls: [],
     chatHistory: []
@@ -33,14 +35,16 @@ const DOM = {
     dialogue: null,
     userInput: null,
     submitBtn: null,
-    modeIndicator: null,
-    agentTools: null,
-    agentSwitch: null,
-    modeLabel: null,
-    logBtn: null,
+    optionAgent: null,
+    optionToken: null,
+    optionLog: null,
+    toolCallDisplay: null,
+    tokenPanel: null,
     logPanel: null,
-    logCloseBtn: null,
-    logContent: null
+    logContent: null,
+    tokenPrompt: null,
+    tokenCompletion: null,
+    tokenTotal: null
 };
 
 /**
@@ -82,52 +86,72 @@ function cacheDOM() {
     DOM.dialogue = document.getElementById('dialogue');
     DOM.userInput = document.getElementById('user-input');
     DOM.submitBtn = document.getElementById('submit-btn');
-    DOM.modeIndicator = document.getElementById('mode-indicator');
-    DOM.agentTools = document.getElementById('agent-tools');
-    DOM.agentSwitch = document.getElementById('agent-switch');
-    DOM.modeLabel = document.getElementById('mode-label');
-    DOM.logBtn = document.getElementById('log-btn');
+    DOM.optionAgent = document.getElementById('option-agent');
+    DOM.optionToken = document.getElementById('option-token');
+    DOM.optionLog = document.getElementById('option-log');
+    DOM.toolCallDisplay = document.getElementById('tool-call-display');
+    DOM.tokenPanel = document.getElementById('token-panel');
     DOM.logPanel = document.getElementById('log-panel');
-    DOM.logCloseBtn = document.getElementById('log-close-btn');
     DOM.logContent = document.getElementById('log-content');
+    DOM.tokenPrompt = document.getElementById('token-prompt');
+    DOM.tokenCompletion = document.getElementById('token-completion');
+    DOM.tokenTotal = document.getElementById('token-total');
 }
 
-function setAgentMode(enabled) {
-    AppState.isAgentMode = enabled;
-    if (enabled) {
-        DOM.modeIndicator.textContent = 'Agent 模式';
-        DOM.modeIndicator.className = 'mode-agent';
-        DOM.agentTools.classList.remove('hidden');
-        DOM.modeLabel.textContent = 'Agent';
-        if (DOM.agentSwitch) DOM.agentSwitch.checked = true;
+function toggleAgentMode() {
+    AppState.isAgentMode = !AppState.isAgentMode;
+    updateAgentUI();
+}
+
+function updateAgentUI() {
+    if (AppState.isAgentMode) {
+        DOM.optionAgent.classList.add('active');
+        if (DOM.toolCallDisplay) {
+            DOM.toolCallDisplay.classList.add('show');
+        }
     } else {
-        DOM.modeIndicator.textContent = '普通模式';
-        DOM.modeIndicator.className = 'mode-normal';
-        DOM.agentTools.classList.add('hidden');
-        DOM.modeLabel.textContent = '普通';
-        if (DOM.agentSwitch) DOM.agentSwitch.checked = false;
+        DOM.optionAgent.classList.remove('active');
+        if (DOM.toolCallDisplay) {
+            DOM.toolCallDisplay.classList.remove('show');
+        }
+    }
+}
+
+function showTokenInfo() {
+    if (DOM.tokenPanel) {
+        DOM.tokenPanel.classList.remove('hidden');
+    }
+}
+
+function hideTokenInfo() {
+    if (DOM.tokenPanel) {
+        DOM.tokenPanel.classList.add('hidden');
+    }
+}
+
+function updateTokenDisplay(usage) {
+    if (!usage) return;
+    if (DOM.tokenPrompt) DOM.tokenPrompt.textContent = usage.prompt_tokens || 0;
+    if (DOM.tokenCompletion) DOM.tokenCompletion.textContent = usage.completion_tokens || 0;
+    if (DOM.tokenTotal) DOM.tokenTotal.textContent = usage.total_tokens || 0;
+}
+
+function toggleLogPanel() {
+    if (DOM.logPanel) {
+        DOM.logPanel.classList.toggle('hidden');
+        if (!DOM.logPanel.classList.contains('hidden')) {
+            renderChatHistory();
+        }
     }
 }
 
 function initModeSwitch() {
-    if (!DOM.agentSwitch) return;
-    DOM.agentSwitch.addEventListener('change', (e) => {
-        setAgentMode(e.target.checked);
-    });
-    setAgentMode(false);
+    AppState.isAgentMode = false;
+    updateAgentUI();
 }
 
 function initLogPanel() {
-    if (!DOM.logBtn || !DOM.logPanel || !DOM.logCloseBtn) return;
-
-    DOM.logBtn.addEventListener('click', () => {
-        DOM.logPanel.classList.remove('hidden');
-        renderChatHistory();
-    });
-
-    DOM.logCloseBtn.addEventListener('click', () => {
-        DOM.logPanel.classList.add('hidden');
-    });
+    if (!DOM.logPanel) return;
 
     DOM.logPanel.addEventListener('click', (e) => {
         if (e.target === DOM.logPanel) {
@@ -175,12 +199,13 @@ function escapeHtml(text) {
 
 function displayToolCalls(toolCalls) {
     if (!toolCalls || toolCalls.length === 0) {
-        DOM.agentTools.classList.add('hidden');
+        if (DOM.toolCallDisplay) DOM.toolCallDisplay.classList.remove('show');
         return;
     }
 
-    DOM.agentTools.classList.remove('hidden');
-    let html = '<h3>工具调用记录</h3><ul>';
+    if (!DOM.toolCallDisplay) return;
+    DOM.toolCallDisplay.classList.add('show');
+    let html = '<ul>';
 
     for (const call of toolCalls) {
         const toolName = call.tool;
@@ -214,13 +239,7 @@ function displayToolCalls(toolCalls) {
     }
 
     html += '</ul>';
-    DOM.agentTools.innerHTML = html;
-}
-
-function escapeHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
+    DOM.toolCallDisplay.innerHTML = html;
 }
 
 /**
@@ -539,10 +558,18 @@ async function handleUserInput() {
             const data = await getAIReply(inputText, agentMode);
             const reply = data.reply || '';
             const toolCalls = data.tool_calls || [];
+            const usage = data.usage;
 
             addToChatHistory('assistant', reply);
-            setAgentMode(data.mode === 'agent');
+            if (data.mode === 'agent' !== AppState.isAgentMode) {
+                AppState.isAgentMode = data.mode === 'agent';
+                updateAgentUI();
+            }
             displayToolCalls(toolCalls);
+
+            if (usage) {
+                updateTokenDisplay(usage);
+            }
 
             const sequence = createDialogueSequence(reply);
             if (sequence.length === 0) {
@@ -553,16 +580,9 @@ async function handleUserInput() {
             AppState.dialogueSequence = sequence;
             AppState.currentSequenceIndex = 0;
             AppState.isProcessingSequence = true;
-
-            try {
-                await preloadAllTTSAudio(sequence);
-                DOM.dialogue.textContent = '';
-                processNextSequenceItem();
-            } catch (preloadError) {
-                console.error('音频预加载过程中发生错误:', preloadError);
-                DOM.dialogue.textContent = '';
-                processNextSequenceItem();
-            }
+            DOM.dialogue.textContent = '';
+            prepareNextAudio(0);
+            processNextSequenceItem();
         }
 
     } catch (error) {
@@ -580,7 +600,7 @@ async function handleUserInput() {
  * @param {boolean} append - 是否追加到现有内容后面
  * @param {number} speed - 每个字之间的延迟时间（毫秒）
  */
-function typewriterEffect(element, text, append = false, speed = 50) {
+function typewriterEffect(element, text, append = false, speed = 50, emotion = null) {
     return new Promise(resolve => {
         if (!element) {
             resolve();
@@ -597,6 +617,9 @@ function typewriterEffect(element, text, append = false, speed = 50) {
         if (!append) {
             element.textContent = '';
         }
+        
+        // 在显示第一个字时触发表情
+        let emotionTriggered = false;
         
         function typeNext() {
             if (index < displayText.length) {
@@ -624,6 +647,12 @@ function typewriterEffect(element, text, append = false, speed = 50) {
                     // 正常显示字符
                     element.textContent = initialText + displayText.substring(0, index + 1);
                     index++;
+
+                    // 在显示第一个字时触发表情
+                    if (!emotionTriggered && emotion) {
+                        emotionTriggered = true;
+                        applyExpression(emotion);
+                    }
                 }
                 
                 // 检查并应用队列中的表情
@@ -717,8 +746,8 @@ async function handleAgentModeStream(message) {
         const decoder = new TextDecoder();
         let buffer = '';
 
-        setAgentMode(true);
-        DOM.dialogue.textContent = '';
+        AppState.isAgentMode = true;
+        updateAgentUI();
 
         while (true) {
             const { done, value } = await reader.read();
@@ -771,8 +800,8 @@ function handleStreamEvent(event, state) {
     if (type === 'partial') {
         state.accumulatedReply = content;
         state.pendingText = '';
-        DOM.dialogue.textContent = content;
-        processContentWithEmotionsForElement(content);
+        const result = processContentWithEmotions(content, '');
+        DOM.dialogue.textContent = result.display;
     }
 
     if (type === 'final') {
@@ -787,6 +816,10 @@ function handleStreamEvent(event, state) {
     if (type === 'done') {
         updateToolCallDisplay(tool_calls || state.toolCalls);
         const finalText = state.accumulatedReply;
+        const usage = event.usage;
+        if (usage) {
+            updateTokenDisplay(usage);
+        }
         if (finalText) {
             const sequence = createDialogueSequence(finalText);
             if (sequence.length > 0) {
@@ -794,12 +827,8 @@ function handleStreamEvent(event, state) {
                 AppState.currentSequenceIndex = 0;
                 AppState.isProcessingSequence = true;
                 DOM.dialogue.textContent = '';
-                preloadAllTTSAudio(sequence).then(() => {
-                    processNextSequenceItem();
-                }).catch(err => {
-                    console.error('TTS预加载失败:', err);
-                    processNextSequenceItem();
-                });
+                prepareNextAudio(0);
+                processNextSequenceItem();
             }
         }
     }
@@ -811,6 +840,12 @@ function processContentWithEmotionsForElement(text) {
     while ((match = emotionRegex.exec(text)) !== null) {
         applyExpression(match[1]);
     }
+}
+
+const VALID_EMOTION_TAGS = ['祈祷', '发光', '翻花绳', '好奇', '泪', '脸黑', '脸红', '生气', '星星'];
+
+function isValidEmotionTag(tag) {
+    return VALID_EMOTION_TAGS.includes(tag);
 }
 
 function processContentWithEmotions(text, pending) {
@@ -825,7 +860,11 @@ function processContentWithEmotions(text, pending) {
         if (match.index > lastIndex) {
             display += fullText.slice(lastIndex, match.index);
         }
-        applyExpression(match[1]);
+        if (isValidEmotionTag(match[1])) {
+            applyExpression(match[1]);
+        } else {
+            display += match[0];
+        }
         lastIndex = emotionRegex.lastIndex;
     }
 
@@ -869,84 +908,56 @@ function initBGM() {
     }, { once: true });
 }
 
-/**
- * 预加载所有序列项的TTS音频
- * @param {Array} sequence - 对话序列
- * @returns {Promise} - 返回预加载完成的Promise
- */
-async function preloadAllTTSAudio(sequence) {
-    // 获取当前序列需要的文本内容（过滤空文本）
-    const validItems = sequence.filter(item => item.text && item.text.trim() !== '');
-    const neededTexts = new Set(validItems.map(item => item.text));
-    
-    // 只保留当前序列需要的缓存，移除其他缓存以释放内存
-    for (const key of AppState.ttsAudioCache.keys()) {
-        if (!neededTexts.has(key)) {
-            AppState.ttsAudioCache.delete(key);
-        }
-    }
-    
-    // 并发预加载所有需要但尚未缓存的音频（过滤空文本）
-    const preloadPromises = validItems.map(item => {
-        // 检查是否已经在缓存中
-        if (AppState.ttsAudioCache.has(item.text)) {
-            console.log(`使用已缓存的TTS音频: ${item.text.substring(0, 20)}...`);
-            return Promise.resolve();
-        }
-        
-        return fetchTTSAudio(item.text).then(blob => {
-            // 缓存预加载的音频数据
+function prepareNextAudio(index, count = 3) {
+    const sequence = AppState.dialogueSequence;
+    if (!sequence) return;
+
+    for (let i = 0; i < count && index + i < sequence.length; i++) {
+        const item = sequence[index + i];
+        if (!item || !item.text || !item.text.trim()) continue;
+        if (AppState.ttsAudioCache.has(item.text)) continue;
+        if (AppState.ttsFailedTexts.has(item.text)) continue;
+
+        fetchTTSAudio(item.text).then(blob => {
             AppState.ttsAudioCache.set(item.text, blob);
-            console.log(`成功预加载TTS音频: ${item.text.substring(0, 20)}...`);
+            console.log(`后台预载TTS音频完成: ${item.text.substring(0, 20)}...`);
         }).catch(error => {
-            console.warn(`预加载TTS音频失败: ${error.message}`);
-            // 即使失败也不阻止程序继续运行
+            console.warn(`后台预载TTS音频失败: ${error.message}`);
+            AppState.ttsFailedTexts.add(item.text);
         });
-    });
-    
-    // 等待所有预加载完成
-    await Promise.all(preloadPromises);
-    console.log('所有TTS音频预加载完成');
-    
-    return Promise.resolve();
+    }
 }
 
 /**
  * 播放语音
  */
 async function playVoice(text) {
-    // 返回Promise，确保函数能够正确等待语音播放完成
-    return new Promise((resolve, reject) => {
-        // 重置之前的状态，但不释放资源
+    return new Promise((resolve) => {
         resetVoiceState(false);
-        
+
         if (!DOM.voicePlayer) {
-            console.error('语音播放器元素不存在');
-            fallbackMouthAnimation(); // 即使没有播放器也显示口型动画
-            resolve(); // 确保Promise被解析
+            fallbackMouthAnimation();
+            resolve();
             return;
         }
-        
+
         try {
-            // 首先检查是否有预加载的音频数据
             const cachedAudio = AppState.ttsAudioCache.get(text);
-            
+
             if (cachedAudio) {
-                console.log('使用预加载的TTS音频');
                 processAudioData(cachedAudio);
+            } else if (AppState.ttsFailedTexts.has(text)) {
+                fallbackMouthAnimation();
+                resolve();
             } else {
-                console.log('请求TTS音频...');
-                // 如果没有预加载，则请求TTS服务获取语音
                 fetchTTSAudio(text).then(blob => {
+                    AppState.ttsAudioCache.set(text, blob);
                     processAudioData(blob);
                 }).catch(error => {
-                    console.error('获取TTS音频失败:', error);
-                    // 确保即使在错误情况下也正确清理资源
-                    setTimeout(() => {
-                        resetVoiceState();
-                        fallbackMouthAnimation();
-                        resolve(); // 确保Promise被解析
-                    }, 100);
+                    console.warn(`获取TTS音频失败: ${error.message}`);
+                    AppState.ttsFailedTexts.add(text);
+                    fallbackMouthAnimation();
+                    resolve();
                 });
             }
             
@@ -1326,28 +1337,32 @@ async function processNextSequenceItem() {
         
         console.log(`处理序列项 ${AppState.currentSequenceIndex + 1}/${AppState.dialogueSequence.length}`, currentItem);
         
-        // 如果有表情，应用表情
-        if (currentItem.emotion) {
-            applyExpression(currentItem.emotion);
-        }
-
-        // 检查文本是否为空（只有表情标签的情况）
         const textContent = currentItem.text ? currentItem.text.trim() : '';
-        
+
         if (textContent) {
-            // 并行执行打字机效果和语音播放
-            const typewriterPromise = typewriterEffect(DOM.dialogue, textContent + ' ', true);
+            if (!AppState.ttsAudioCache.has(textContent) && !AppState.ttsFailedTexts.has(textContent)) {
+                AppState.isWaitingForAudio = true;
+                DOM.dialogue.textContent = '思考中……';
+                while (!AppState.ttsAudioCache.has(textContent) && !AppState.ttsFailedTexts.has(textContent) && AppState.isProcessingSequence) {
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                }
+                AppState.isWaitingForAudio = false;
+                if (!AppState.isProcessingSequence) return;
+            }
+
+            if (!AppState.isProcessingSequence) return;
+
+            AppState.currentSequenceIndex++;
+            prepareNextAudio(AppState.currentSequenceIndex);
+
+            const typewriterPromise = typewriterEffect(DOM.dialogue, textContent + ' ', false, 50, currentItem.emotion);
             const voicePromise = playVoice(textContent);
             await Promise.all([typewriterPromise, voicePromise]);
-        } else {
-            // 空文本（只有表情标签），只等待一小段时间后继续
+        } else if (currentItem.emotion) {
+            applyExpression(currentItem.emotion);
             await new Promise(resolve => setTimeout(resolve, 300));
         }
-        
-        // 移动到下一个序列项
-        AppState.currentSequenceIndex++;
-        
-        // 递归处理下一个序列项 - 使用setTimeout确保当前的调用栈完成
+
         setTimeout(processNextSequenceItem, 10);
         
     } catch (error) {
