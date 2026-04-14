@@ -9,5 +9,6 @@ models/**
 workspace/**/*
 
 !knowledge/MEMORY.md
-!GSV/api.bat
+!GSV/tts_server_ws.bat
+!GSV/tts_server_ws.py
 !GSV/Install_GSV_here.txt
