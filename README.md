@@ -1,5 +1,7 @@
 # Nahida Chat Application
 
+[中文版](./README_zh.md)
+
 This is an application that integrates Live2D model and dialogue functionality, replacing the originally static Nahida image with a dynamic Live2D model, retaining features such as expressions, actions, and lip movements that change with voice volume.
 
 ## Features
