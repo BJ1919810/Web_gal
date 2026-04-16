@@ -1,12 +1,12 @@
 setup_live2d.bat
 .env
 GSV/**/*
-backup/**
 chroma_db/**
 __pycache__/**
 knowledge/**/*
 models/**
 workspace/**/*
+TODO.md
 
 !knowledge/MEMORY.md
 !GSV/tts_server_ws.bat

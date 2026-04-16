@@ -42,7 +42,7 @@ pip install -r requirements.txt
 
 ## 运行步骤
 
-1. 确保 GSV 目录下的 TTS 服务已经启动（利用该项目的 api.py 启动，端口为 9880）
+1. 确保 GSV 目录下的 TTS 服务已经启动（利用该项目的 tts_server_ws.bat 启动，端口为 9880）
 
 2. 配置 API 密钥：
    - 在项目根目录创建 `.env` 文件
@@ -117,7 +117,7 @@ Agent 模式下，AI 可以自动调用合适的工具来完成任务：
 - 如果 Live2D 模型加载失败，会尝试加载备用模型
 - 确保网络连接正常，以便加载必要的 JavaScript 库
 - 请确保在 `.env` 文件中填入正确的 Deepseek API key
-- 请确定 GSV/api.bat 中的 python 运行环境是 GSV 自带的 runtime 还是你的系统中的默认 python 环境
+- 请确定 GSV/tts_server_ws.bat 中的 python 运行环境是 GSV 自带的 runtime 还是你的系统中的默认 python 环境
 - 首次运行时会下载 RAG 系统所需的模型文件（约几百 MB）
 - Agent 模式下删除文件前请确认路径正确，删除后无法恢复
 

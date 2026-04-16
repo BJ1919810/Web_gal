@@ -44,7 +44,7 @@ pip install -r requirements.txt
 
 ## Getting Started
 
-1. Ensure the TTS service under the GSV directory is running (use api.py from that project, port 9880)
+1. Ensure the TTS service under the GSV directory is running (use tts_server_ws.bat from that project, port 9880)
 
 2. Configure API key:
    - Create a `.env` file in the project root
@@ -114,7 +114,7 @@ Click the book icon in the bottom-right corner to open the history panel and vie
 - If Live2D model fails to load, will try to load a backup model
 - Ensure stable network connection to load necessary JavaScript libraries
 - Make sure to fill in the correct Deepseek API key in the `.env` file
-- Make sure the python runtime in GSV/api.bat is either the runtime that comes with GSV or your system's default python environment
+- Make sure the python runtime in GSV/tts_server_ws.bat is either the runtime that comes with GSV or your system's default python environment
 - First run will download RAG system model files (several hundred MB)
 - In Agent mode, please confirm the path is correct before deleting files, deleted files cannot be recovered
 

@@ -49,8 +49,8 @@ class RAGSystem:
 
     @staticmethod
     def _file_source_type(filename: str) -> str:
-        if re.fullmatch(r"memory_\d{4}-\d{2}-\d{2}\.txt", filename):
-            return "daily_dialogue"
+        if re.fullmatch(r"dialogue_\d{4}-\d{2}-\d{2}\.txt", filename):
+            return "dialogue"
         return "knowledge"
 
     def compute_hash(self):
@@ -276,7 +276,7 @@ class RAGSystem:
 
     @staticmethod
     def _bucket_results(results: List[Dict], dialogue_top_k: int, knowledge_top_k: int) -> Dict[str, List[Dict]]:
-        old_dialogue = [r for r in results if r.get("source_type") == "daily_dialogue"][: max(dialogue_top_k, 0)]
+        old_dialogue = [r for r in results if r.get("source_type") == "dialogue"][: max(dialogue_top_k, 0)]
         knowledge = [r for r in results if r.get("source_type") == "knowledge"][: max(knowledge_top_k, 0)]
         return {"old_dialogue": old_dialogue, "knowledge": knowledge, "all": old_dialogue + knowledge}
 
@@ -301,7 +301,7 @@ class RAGSystem:
         bucketed = self._bucket_results(candidates, dialogue_top_k, knowledge_top_k)
 
         if len(bucketed["old_dialogue"]) < max(dialogue_top_k, 0):
-            extra = self._supplement_by_type(query_variants, "daily_dialogue", dialogue_top_k - len(bucketed["old_dialogue"]))
+            extra = self._supplement_by_type(query_variants, "dialogue", dialogue_top_k - len(bucketed["old_dialogue"]))
             existing = {f"{item['source']}#{item['chunk_id']}" for item in bucketed["old_dialogue"]}
             for item in extra:
                 key = f"{item['source']}#{item['chunk_id']}"
