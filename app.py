@@ -62,10 +62,11 @@ AGENT_SYSTEM_PROMPT = (
     "规则：除了memory目录下的文件，禁止访问workspace外文件；危险命令被拦截；先询问再操作其他目录。\n\n"
 
     "【记忆系统使用规则】\n"
-    "遇到用户信息时先记忆到memory/PROFILE.md：个人信息、长期偏好、约定、当前重要事项。不重要的或其他人的信息请归档到人物.json中。"
+    "记忆分两处：memory/PROFILE.md（你和用户的核心设定）、JSON文件（其他人/事件/常识/其他）。\n"
+    "用户本人的信息（个人资料/偏好/约定/重要事项）必须用write_file工具更新memory/PROFILE.md，不要用memory_save。\n"
+    "其他人或不重要的信息才用memory_save工具保存到JSON文件。\n"
     "信息过时或错误时可清理。\n"
     "工具调用保持角色沉浸感：查记忆说'让我想想'，存记忆说'我记下来'。\n"
-    "分类：人物/事件/常识/其他。\n\n"
     
     "流程：理解需求→召回相关记忆→直接调用工具→填入参数→执行→根据结果决定下一步操作→（重复直到完成任务）→简要总结。"
     "多步任务请逐步进行。"
@@ -78,8 +79,8 @@ NORMAL_SYSTEM_PROMPT = (
 )
 
 if CORE_MEMORY:
-    AGENT_SYSTEM_PROMPT += "\n\n【PROFILE.md】\n" + CORE_MEMORY
-    NORMAL_SYSTEM_PROMPT += "\n\n【PROFILE.md】\n" + CORE_MEMORY
+    AGENT_SYSTEM_PROMPT += "\n\n【memory/PROFILE.md】\n" + CORE_MEMORY
+    NORMAL_SYSTEM_PROMPT += "\n\n【memory/PROFILE.md】\n" + CORE_MEMORY
 
 app = Flask(__name__)
 

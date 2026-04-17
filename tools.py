@@ -6,6 +6,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 BASE_DIR = Path(__file__).resolve().parent
+MEMORY_DIR = BASE_DIR / "memory"
+MEMORY_DIR.mkdir(exist_ok=True)
+
 WORKSPACE_DIR = BASE_DIR / "workspace"
 WORKSPACE_DIR.mkdir(exist_ok=True)
 
@@ -60,6 +63,8 @@ def _is_safe_path(path: str) -> bool:
 
 def _sanitize_path(path: str) -> str:
     path = path.strip().replace("..", "")
+    if path.startswith("memory/") or path.startswith("memory\\"):
+        return str(MEMORY_DIR / path[7:])
     if not path.startswith("/") and ":" not in path:
         return str(WORKSPACE_DIR / path)
     if _is_safe_path(path):
@@ -86,8 +91,8 @@ def read_file(path: str) -> Dict[str, Any]:
 
 def write_file(path: str, content: str, append: bool = False) -> Dict[str, Any]:
     safe_path = _sanitize_path(path)
-    if not safe_path.startswith(str(WORKSPACE_DIR.resolve())):
-        return {"success": False, "error": "路径访问被拒绝：禁止在 workspace 目录以外写入文件"}
+    if not safe_path.startswith(str(WORKSPACE_DIR.resolve())) and not safe_path.startswith(str(MEMORY_DIR.resolve())):
+        return {"success": False, "error": "路径访问被拒绝：禁止在 workspace 或 memory 目录以外写入文件"}
     try:
         file_path = Path(safe_path)
         file_path.parent.mkdir(parents=True, exist_ok=True)
@@ -368,7 +373,7 @@ TOOLS = {
                 "scope": {
                     "type": "string",
                     "description": "搜索范围：可为具体文件路径或文件夹路径。若提供，会先将该文件/文件夹中的文档动态索引后再搜索。留空则搜索已有索引。",
-                    "default": null,
+                    "default": None,
                 },
             },
             "required": ["query"],
@@ -450,7 +455,8 @@ TOOLS = {
     "memory_save": {
         "name": "memory_save",
         "description": "识别到需要或值得记录的信息后，保存记忆到本地 JSON 文件，自动创建父条目。"
-        "必须保存的情况：用户或他人的个人信息（姓名/年龄/职业）、偏好需求、约定决定、重要事件。"
+        "必须保存的情况：除用户外其他人的个人信息（姓名/年龄/职业）、偏好需求、约定决定、重要事项。"
+        "注意：若是用户本人的信息（个人资料、长期偏好、约定决定、重要事项），请使用write_file工具更新memory/PROFILE.md文件，不要使用此工具。"
         "保持角色沉浸感：调用时说'让我记下来'或'这个我得好好记住'。",
         "parameters": {
             "type": "object",
