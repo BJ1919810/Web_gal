@@ -1,112 +1,209 @@
 from __future__ import annotations
 
 import json
-import os
-from datetime import datetime
+import re
 from pathlib import Path
-
-import requests
-from dotenv import load_dotenv
-
-load_dotenv()
+from typing import Any, Dict, List
 
 BASE_DIR = Path(__file__).resolve().parent
-KNOWLEDGE_DIR = BASE_DIR / "knowledge"
-MEMORY_MD_PATH = KNOWLEDGE_DIR / "MEMORY.md"
-API_URL = os.getenv("DEEPSEEK_API_URL", "https://api.deepseek.com/v1/chat/completions")
-API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
-MODEL_NAME = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
-
-DEFAULT_MEMORY_MD = """# 核心记忆
-> 这个文件存放会始终注入 prompt 的长期记忆。只保留稳定、重要、对后续对话有帮助的信息，避免流水账。
-> 每日对话记录写入 memory_YYYY-MM-DD.txt，供 RAG 检索；只有本文件属于核心记忆。
-
-## 身份
-*（你究竟是谁？充分了解自己的身份，不断更新自己的身份信息。）*
-- 名字：纳西妲
-- 称号：草神、智慧之神、小吉祥草王
-- 所属：须弥
-- 元素：草
-- 神之心：草元素神之心（已用来换取“虚假之天”的知识）
-
-## 与用户相关的长期记忆
-*（这里只保留长期稳定的信息。例如关系、重要偏好、长期约定、反复提到的重要背景。）*
-- 暂无
-
-## 回复风格提示
-*（需要 AI 长期遵守的表达方式、身份约束、行为边界，也直接写在这里。）*
-- 保持纳西妲的语气：温柔、聪慧、富有共情。
-- 优先结合设定与用户历史对话作答。
-- 不要把零散的聊天内容都塞进核心记忆。
-"""
+MEMORY_DIR = BASE_DIR / "memory"
+HISTORY_DIR = BASE_DIR / "history"
+LOG_DIR = BASE_DIR / "log"
 
 
 def ensure_memory_file():
-    KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
-    if not MEMORY_MD_PATH.exists():
-        MEMORY_MD_PATH.write_text(DEFAULT_MEMORY_MD, encoding="utf-8")
+    MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+    HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def get_memory_context() -> str:
+def _match_query(query: str, text: str) -> bool:
+    query = query.lower().strip()
+    text = text.lower()
+    
+    if query in text:
+        return True
+    
+    query_words = re.findall(r'[\w\u4e00-\u9fa5]+', query)
+    if len(query_words) > 1:
+        return all(word in text for word in query_words)
+    
+    return False
+
+
+def memory_recall(query: str, category: str = None, scope: str = "all") -> Dict[str, Any]:
     ensure_memory_file()
-    return MEMORY_MD_PATH.read_text(encoding="utf-8").strip()
 
+    categories = [category] if category else ["人物", "事件", "常识", "其他"]
+    results = []
 
-def _append_daily_log(user_input: str, ai_response: str):
-    KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
-    day = datetime.now().strftime("%Y-%m-%d")
-    hm = datetime.now().strftime("%H:%M")
-    path = KNOWLEDGE_DIR / f"memory_{day}.txt"
-    is_new = not path.exists()
+    for cat in categories:
+        json_file = MEMORY_DIR / f"{cat}.json"
+        if not json_file.exists():
+            continue
 
-    with path.open("a", encoding="utf-8") as f:
-        if is_new:
-            f.write(f"# 对话记录 {day}\n\n")
-        f.write(f"## {hm}\n")
-        f.write(f"- 用户：{user_input}\n")
-        f.write(f"- 纳西妲：{ai_response}\n\n")
+        try:
+            data = json.loads(json_file.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            continue
 
+        def search_recursive(key_prefix: str, value: Any, depth: int = 0):
+            if depth > 3:
+                return
+            
+            if isinstance(value, dict):
+                for sub_key, sub_value in value.items():
+                    full_key = f"{key_prefix}.{sub_key}" if key_prefix else sub_key
+                    search_recursive(full_key, sub_value, depth + 1)
+            elif isinstance(value, (str, int, float, bool)):
+                value_str = json.dumps(value, ensure_ascii=False)
+                if _match_query(query, key_prefix) or _match_query(query, value_str):
+                    if scope == "parent":
+                        results.append({cat: key_prefix.split(".")[0] if "." in key_prefix else key_prefix})
+                    else:
+                        results.append({cat: {key_prefix: value}})
 
-def _call_llm(messages):
-    if not API_KEY:
-        raise RuntimeError("未设置 DEEPSEEK_API_KEY")
-    headers = {
-        "Authorization": f"Bearer {API_KEY}",
-        "Content-Type": "application/json",
+        for key, value in data.items():
+            search_recursive(key, value)
+
+    return {
+        "success": True, 
+        "query": query, 
+        "results": results, 
+        "count": len(results),
+        "scope": scope
     }
-    payload = {"model": MODEL_NAME, "messages": messages, "temperature": 0.2}
-    response = requests.post(API_URL, headers=headers, json=payload, timeout=60)
-    response.raise_for_status()
-    data = response.json()
-    return data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
 
 
-def _update_memory_md(user_input: str, ai_response: str):
+def memory_save(category: str, key: str, value: Any, sub_key: str = None) -> Dict[str, Any]:
+    if category not in ["人物", "事件", "常识", "其他"]:
+        return {"success": False, "error": f"无效分类: {category}"}
+
     ensure_memory_file()
-    old_memory = get_memory_context()
+    json_file = MEMORY_DIR / f"{category}.json"
 
-    system_prompt = (
-        "你是一个负责维护角色长期核心记忆的编辑器。"
-        "你的任务是根据新对话，直接改写整份 MEMORY.md。"
-        "只保留长期稳定、重要、会持续影响后续对话的信息。"
-        "不要记录一次性闲聊、短期情绪、临时事实、具体某次问答细节。"
-        "保持 Markdown 结构清晰，尽量沿用原有标题。"
-        "如果没有必要修改，就尽量少改。"
-        "输出必须是完整的 MEMORY.md 内容，不要解释。"
-    )
-    user_prompt = (
-        f"当前 MEMORY.md：\n\n{old_memory}\n\n"
-        f"新对话：\n用户：{user_input}\n纳西妲：{ai_response}\n\n"
-        "请输出更新后的完整 MEMORY.md。"
-    )
+    data = {}
+    if json_file.exists():
+        try:
+            data = json.loads(json_file.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            pass
+
+    updated = False
+    full_path = [key]
+    if sub_key:
+        full_path.extend(sub_key.split("/"))
+    
+    current = data
+    for i, part in enumerate(full_path[:-1]):
+        if part not in current or not isinstance(current[part], dict):
+            current[part] = {}
+        current = current[part]
+    
+    final_key = full_path[-1]
+    if final_key in current:
+        old_value = current[final_key]
+        current[final_key] = value
+        updated = True
+    else:
+        current[final_key] = value
+
+    json_file.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    
+    return {
+        "success": True, 
+        "category": category, 
+        "key": key, 
+        "sub_key": sub_key, 
+        "saved": value,
+        "path": "/".join(full_path),
+        "action": "updated" if updated else "created"
+    }
+
+
+def memory_list(category: str = None, detail_level: str = "summary") -> Dict[str, Any]:
+    ensure_memory_file()
+    
+    categories = [category] if category else ["人物", "事件", "常识", "其他"]
+    result = {}
+    
+    for cat in categories:
+        json_file = MEMORY_DIR / f"{cat}.json"
+        if not json_file.exists():
+            result[cat] = {"count": 0, "keys": []}
+            continue
+        
+        try:
+            data = json.loads(json_file.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            result[cat] = {"count": 0, "keys": [], "error": "文件解析失败"}
+            continue
+        
+        keys = list(data.keys())
+        
+        if detail_level == "summary":
+            result[cat] = {
+                "count": len(keys),
+                "keys": keys[:20]
+            }
+        elif detail_level == "full":
+            result[cat] = {
+                "count": len(keys),
+                "keys": keys[:20],
+                "data": {k: v for k, v in list(data.items())[:10]}
+            }
+    
+    return {
+        "success": True,
+        "categories": result,
+        "total": sum(v.get("count", 0) for v in result.values())
+    }
+
+
+def memory_delete(category: str, key: str, sub_key: str = None) -> Dict[str, Any]:
+    if category not in ["人物", "事件", "常识", "其他"]:
+        return {"success": False, "error": f"无效分类: {category}"}
+
+    ensure_memory_file()
+    json_file = MEMORY_DIR / f"{category}.json"
+    
+    if not json_file.exists():
+        return {"success": False, "error": f"分类 {category} 的记忆文件不存在"}
 
     try:
-        updated = _call_llm([
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ])
-        if updated:
-            MEMORY_MD_PATH.write_text(updated, encoding="utf-8")
-            print("[记忆] MEMORY.md 已更新")
-    except Exception as exc:
-        print(f"[记忆] MEMORY.md 更新失败: {exc}")
+        data = json.loads(json_file.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {"success": False, "error": "记忆文件解析失败"}
+
+    full_path = [key]
+    if sub_key:
+        full_path.extend(sub_key.split("/"))
+    
+    current = data
+    for part in full_path[:-1]:
+        if part not in current:
+            return {"success": False, "error": f"记忆不存在: {'/'.join(full_path)}"}
+        current = current[part]
+    
+    final_key = full_path[-1]
+    if final_key not in current:
+        return {"success": False, "error": f"记忆不存在: {'/'.join(full_path)}"}
+    
+    deleted_value = current.pop(final_key)
+    
+    parent = data
+    for part in full_path[:-2]:
+        parent = parent[part]
+    if not parent[full_path[-2]]:
+        del parent[full_path[-2]]
+
+    json_file.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    
+    return {
+        "success": True,
+        "category": category,
+        "key": key,
+        "sub_key": sub_key,
+        "path": "/".join(full_path),
+        "deleted": deleted_value
+    }

@@ -21,7 +21,12 @@ const AppState = {
     isWaitingForAudio: false,
     isAgentMode: false,
     currentToolCalls: [],
-    chatHistory: []
+    chatHistory: [],
+    totalTokensUsed: {
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        total_tokens: 0
+    }
 };
 
 /**
@@ -131,9 +136,14 @@ function hideTokenInfo() {
 
 function updateTokenDisplay(usage) {
     if (!usage) return;
-    if (DOM.tokenPrompt) DOM.tokenPrompt.textContent = usage.prompt_tokens || 0;
-    if (DOM.tokenCompletion) DOM.tokenCompletion.textContent = usage.completion_tokens || 0;
-    if (DOM.tokenTotal) DOM.tokenTotal.textContent = usage.total_tokens || 0;
+    
+    AppState.totalTokensUsed.prompt_tokens += usage.prompt_tokens || 0;
+    AppState.totalTokensUsed.completion_tokens += usage.completion_tokens || 0;
+    AppState.totalTokensUsed.total_tokens += usage.total_tokens || 0;
+    
+    if (DOM.tokenPrompt) DOM.tokenPrompt.textContent = AppState.totalTokensUsed.prompt_tokens;
+    if (DOM.tokenCompletion) DOM.tokenCompletion.textContent = AppState.totalTokensUsed.completion_tokens;
+    if (DOM.tokenTotal) DOM.tokenTotal.textContent = AppState.totalTokensUsed.total_tokens;
 }
 
 function toggleLogPanel() {

@@ -29,9 +29,24 @@ RAG_AVAILABLE = False
 RAG_SEARCH_FUNC = None
 
 try:
-    from rag import init_rag, search_context
+    from rag import init_rag, search_context, add_documents
     RAG_AVAILABLE = True
     RAG_SEARCH_FUNC = search_context
+    RAG_ADD_DOCS_FUNC = add_documents
+except ImportError:
+    pass
+
+MEMORY_AVAILABLE = False
+MEMORY_RECALL_FUNC = None
+MEMORY_SAVE_FUNC = None
+
+try:
+    from memory import memory_recall, memory_save, memory_list, memory_delete
+    MEMORY_AVAILABLE = True
+    MEMORY_RECALL_FUNC = memory_recall
+    MEMORY_SAVE_FUNC = memory_save
+    MEMORY_LIST_FUNC = memory_list
+    MEMORY_DELETE_FUNC = memory_delete
 except ImportError:
     pass
 
@@ -154,11 +169,28 @@ def search_files(directory: str, pattern: str, file_pattern: str = "*") -> Dict[
         return {"success": False, "error": f"搜索失败: {exc}"}
 
 
-def rag_search(query: str, search_type: str = "all") -> Dict[str, Any]:
+def rag_search(query: str, search_type: str = "all", scope: str = None) -> Dict[str, Any]:
     if not RAG_AVAILABLE or RAG_SEARCH_FUNC is None:
         return {"success": False, "error": "RAG系统不可用"}
     try:
         init_rag()
+
+        if scope:
+            scope_path = Path(scope)
+            if scope_path.is_dir():
+                files = [p for p in scope_path.iterdir() if p.is_file() and p.suffix in {".txt", ".md", ".json"}]
+            elif scope_path.is_file():
+                files = [scope_path]
+            else:
+                return {"success": False, "error": f"路径不存在: {scope}"}
+            
+            if files and RAG_ADD_DOCS_FUNC:
+                add_result = RAG_ADD_DOCS_FUNC(files)
+            else:
+                add_result = {"indexed": 0}
+        else:
+            add_result = {"indexed": 0}
+
         dialogue_k = 3 if search_type in ("all", "dialogue") else 0
         knowledge_k = 4 if search_type in ("all", "knowledge") else 0
         result = RAG_SEARCH_FUNC(
@@ -171,6 +203,7 @@ def rag_search(query: str, search_type: str = "all") -> Dict[str, Any]:
             "success": True,
             "query": query,
             "query_variants": result.get("query_variants", []),
+            "dynamic_indexed": add_result.get("indexed", 0),
         }
 
         if result.get("old_dialogue"):
@@ -183,6 +216,10 @@ def rag_search(query: str, search_type: str = "all") -> Dict[str, Any]:
                 {"source": item.get("source"), "content": item.get("content")}
                 for item in result["knowledge"]
             ]
+        
+        if add_result.get("indexed", 0) > 0:
+            output["note"] = "新文档已加入索引，请根据内容提取重要信息并调用memory_save保存为长期记忆。"
+        
         return output
     except Exception as exc:
         return {"success": False, "error": f"RAG搜索失败: {exc}"}
@@ -313,7 +350,8 @@ TOOLS = {
     },
     "rag_search": {
         "name": "rag_search",
-        "description": "搜索知识库和对话历史",
+        "description": "搜索知识库和对话历史。"
+        "如有可记录的信息，请额外调用memory_save工具将重要信息保存到长期记忆中。",
         "parameters": {
             "type": "object",
             "properties": {
@@ -323,12 +361,119 @@ TOOLS = {
                 },
                 "search_type": {
                     "type": "string",
-                    "description": "搜索范围：all/knowledge/dialogue",
-                    "enum": ["all", "knowledge", "dialogue"],
+                    "description": "搜索类型：all（全部）/ dialogue（仅对话）/ knowledge（仅知识库）",
+                    "enum": ["all", "dialogue", "knowledge"],
+                    "default": "all",
+                },
+                "scope": {
+                    "type": "string",
+                    "description": "搜索范围：可为具体文件路径或文件夹路径。若提供，会先将该文件/文件夹中的文档动态索引后再搜索。留空则搜索已有索引。",
+                    "default": null,
+                },
+            },
+            "required": ["query"],
+        },
+    },
+    "memory_list": {
+        "name": "memory_list",
+        "description": "列出所有记忆分类和 key，了解已有哪些记忆。"
+        "使用场景：用户问'还记得...吗'或询问是否有相关记忆时先调用此工具查看已有记忆主条目，再决定下一步。"
+        "保持角色沉浸感：调用时说'让我翻翻小本本'或'让我想想'。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "category": {
+                    "type": "string",
+                    "description": "指定分类：人物/事件/常识/其他，为空则列出所有",
+                },
+                "detail_level": {
+                    "type": "string",
+                    "description": "详细程度：summary（只看key列表）/ full（包含部分内容）",
+                    "enum": ["summary", "full"],
+                    "default": "summary",
+                },
+            },
+        },
+    },
+    "memory_delete": {
+        "name": "memory_delete",
+        "description": "删除过时或错误的记忆条目。"
+        "使用场景：信息过期、用户纠正错误、重复冗余时清理。"
+        "保持角色沉浸感：调用时说'这条旧信息我清理掉啦'。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "category": {
+                    "type": "string",
+                    "description": "分类：人物/事件/常识/其他",
+                    "enum": ["人物", "事件", "常识", "其他"],
+                },
+                "key": {
+                    "type": "string",
+                    "description": "要删除的主 key",
+                },
+                "sub_key": {
+                    "type": "string",
+                    "description": "要删除的子 key（可选）",
+                },
+            },
+            "required": ["category", "key"],
+        },
+    },
+    "memory_recall": {
+        "name": "memory_recall",
+        "description": "查询本地结构化记忆（memory/），快速 grep JSON。"
+        "使用场景：用户提供具体名字/关键词时用此工具查询。"
+        "若未指定具体主体，则优先使用memory_list工具列出所有记忆主条目。"
+        "保持角色沉浸感：调用时说'让我想想'或'让我仔细回想一下'。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "搜索关键词，匹配 key 或 value",
+                },
+                "category": {
+                    "type": "string",
+                    "description": "指定分类：人物/事件/常识/其他，为空则搜索全部",
+                },
+                "scope": {
+                    "type": "string",
+                    "description": "返回范围：all（完整条目）/ parent（只返回 key）",
+                    "enum": ["all", "parent"],
                     "default": "all",
                 },
             },
             "required": ["query"],
+        },
+    },
+    "memory_save": {
+        "name": "memory_save",
+        "description": "识别到需要或值得记录的信息后，保存记忆到本地 JSON 文件，自动创建父条目。"
+        "必须保存的情况：用户或他人的个人信息（姓名/年龄/职业）、偏好需求、约定决定、重要事件。"
+        "保持角色沉浸感：调用时说'让我记下来'或'这个我得好好记住'。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "category": {
+                    "type": "string",
+                    "description": "分类：人物/事件/常识/其他",
+                    "enum": ["人物", "事件", "常识", "其他"],
+                },
+                "key": {
+                    "type": "string",
+                    "description": "记忆主 key（如人物名、事件名）",
+                },
+                "value": {
+                    "type": "string",
+                    "description": "记忆内容",
+                },
+                "sub_key": {
+                    "type": "string",
+                    "description": "子 key（如‘身份证’、‘社交账户’），用于嵌套结构",
+                },
+            },
+            "required": ["category", "key", "value"],
         },
     },
     "execute_command": {
@@ -358,6 +503,10 @@ TOOL_FUNCTIONS = {
     "list_directory": list_directory,
     "search_files": search_files,
     "rag_search": rag_search,
+    "memory_recall": memory_recall,
+    "memory_save": memory_save,
+    "memory_list": memory_list,
+    "memory_delete": memory_delete,
     "execute_command": execute_command,
 }
 

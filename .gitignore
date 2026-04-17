@@ -3,12 +3,14 @@ setup_live2d.bat
 GSV/**/*
 chroma_db/**
 __pycache__/**
-knowledge/**/*
 models/**
 workspace/**/*
+memory/**/*
+history/**/*
+log/**/*
 TODO.md
 
-!knowledge/MEMORY.md
 !GSV/tts_server_ws.bat
 !GSV/tts_server_ws.py
 !GSV/Install_GSV_here.txt
+!memory/PROFILE.md

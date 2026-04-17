@@ -5,6 +5,7 @@ import io
 import json
 import os
 import wave
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -24,7 +25,15 @@ BASE_DIR = Path(__file__).resolve().parent
 WORKSPACE_DIR = BASE_DIR / "workspace"
 MODEL_DIR = BASE_DIR / "GSV" / "models"
 LIVE2D_DIR = BASE_DIR / "live2d"
+LOG_DIR = BASE_DIR / "log"
+HISTORY_DIR = BASE_DIR / "history"
+MEMORY_DIR = BASE_DIR / "memory"
 TMP_TXT_PATH = LIVE2D_DIR / "tmp.txt"
+
+WORKSPACE_DIR.mkdir(exist_ok=True)
+LOG_DIR.mkdir(exist_ok=True)
+HISTORY_DIR.mkdir(exist_ok=True)
+MEMORY_DIR.mkdir(exist_ok=True)
 
 API_URL = os.getenv("DEEPSEEK_API_URL", "https://api.deepseek.com/v1/chat/completions")
 API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
@@ -33,21 +42,44 @@ AGENT_MODEL_NAME = os.getenv("DEEPSEEK_AGENT_MODEL", os.getenv("DEEPSEEK_MODEL",
 
 MAX_TOOL_CALLS = 10
 
+def _load_core_memory() -> str:
+    memory_file = MEMORY_DIR / "PROFILE.md"
+    if memory_file.exists():
+        try:
+            return memory_file.read_text(encoding="utf-8")
+        except Exception:
+            pass
+    return ""
+
+CORE_MEMORY = _load_core_memory()
+
 AGENT_SYSTEM_PROMPT = (
-    "你将扮演《原神》中的纳西妲。回复时在情感语句前加标签，如[星星]、[好奇]。"
+    "你是一位擅长角色扮演的Agent。\n\n"
+    "回复时在情感语句开头加标签，如[星星]、[好奇]。\n"
     "标签：祈祷、发光、翻花绳、好奇、泪、脸黑、脸红、生气、星星。\n\n"
 
     "你可以通过工具帮助用户，默认工作目录为 'workspace'。\n"
-    "规则：禁止访问workspace外文件；危险命令被拦截；先询问再操作其他目录。\n\n"
+    "规则：除了memory目录下的文件，禁止访问workspace外文件；危险命令被拦截；先询问再操作其他目录。\n\n"
+
+    "【记忆系统使用规则】\n"
+    "遇到用户信息时先记忆到memory/PROFILE.md：个人信息、长期偏好、约定、当前重要事项。不重要的或其他人的信息请归档到人物.json中。"
+    "信息过时或错误时可清理。\n"
+    "工具调用保持角色沉浸感：查记忆说'让我想想'，存记忆说'我记下来'。\n"
+    "分类：人物/事件/常识/其他。\n\n"
     
-    "流程：理解需求→直接调用工具→填入参数→执行→根据结果决定下一步操作→（重复直到完成任务）→简要总结。"
+    "流程：理解需求→召回相关记忆→直接调用工具→填入参数→执行→根据结果决定下一步操作→（重复直到完成任务）→简要总结。"
     "多步任务请逐步进行。"
 )
 
 NORMAL_SYSTEM_PROMPT = (
-    "你将扮演《原神》中的纳西妲。回复时在情感语句前加标签，如[星星]、[好奇]。"
+    "你是一位擅长角色扮演的聊天助手。\n"
+    "回复时在情感语句开头加标签，如[星星]、[好奇]。\n"
     "标签：祈祷、发光、翻花绳、好奇、泪、脸黑、脸红、生气、星星。"
 )
+
+if CORE_MEMORY:
+    AGENT_SYSTEM_PROMPT += "\n\n【PROFILE.md】\n" + CORE_MEMORY
+    NORMAL_SYSTEM_PROMPT += "\n\n【PROFILE.md】\n" + CORE_MEMORY
 
 app = Flask(__name__)
 
@@ -268,6 +300,32 @@ def _agent_chat_completion(
     return messages, message.get("tool_calls", []), usage
 
 
+def _log_cot(step: int, user_input: str, messages: List[Dict], tool_calls: List[Dict], round_usage: list = None):
+    day = datetime.now().strftime("%Y-%m-%d")
+    log_file = LOG_DIR / f"cot_{day}.jsonl"
+    
+    assistant_messages = [
+        {"role": m["role"], "content": m.get("content", ""), "has_tool_calls": bool(m.get("tool_calls"))}
+        for m in messages
+        if m["role"] in ("assistant", "tool")
+    ]
+    
+    total_round_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    if round_usage and len(round_usage) > 0:
+        total_round_usage = dict(round_usage[-1])
+    
+    entry = {
+        "ts": datetime.now().isoformat(),
+        "step": step,
+        "usage": total_round_usage,
+        "user_input": user_input,
+        "messages": assistant_messages,
+        "tool_calls": tool_calls,
+    }
+    with log_file.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False, indent=2) + "\n\n")
+
+
 def run_agent_loop_stream(user_input: str, history: List[Dict[str, str]] = None):
     messages: List[Dict[str, Any]] = [
         {"role": "system", "content": AGENT_SYSTEM_PROMPT},
@@ -282,11 +340,13 @@ def run_agent_loop_stream(user_input: str, history: List[Dict[str, str]] = None)
     total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
     step = 0
+    round_usage = []
     while step < MAX_TOOL_CALLS:
         messages, tool_calls, usage = _agent_chat_completion(messages, tools=get_tools_schema())
 
         for k in total_usage:
             total_usage[k] += usage.get(k, 0)
+        round_usage.append(usage)
 
         current_msg = messages[-1]
         partial_text = current_msg.get("content", "")
@@ -331,7 +391,9 @@ def run_agent_loop_stream(user_input: str, history: List[Dict[str, str]] = None)
     else:
         yield {"type": "final", "content": "处理完成，但未收到最终回复。"}
 
-    yield {"type": "done", "tool_calls": tool_call_history, "usage": total_usage}
+    final_usage = dict(round_usage[-1]) if round_usage else total_usage
+    _log_cot(step, user_input, messages, tool_call_history, round_usage)
+    yield {"type": "done", "tool_calls": tool_call_history, "usage": final_usage}
 
 
 def _normal_chat(user_input: str, history: List[Dict[str, str]] = None) -> Tuple[str, Dict[str, int]]:
@@ -341,6 +403,7 @@ def _normal_chat(user_input: str, history: List[Dict[str, str]] = None) -> Tuple
             messages.append(h)
     messages.append({"role": "user", "content": user_input})
     reply, usage = _chat_completion(messages, model=MODEL_NAME, temperature=1.0)
+    _save_dialogue(user_input, reply, agent_mode=False)
     return reply, usage
 
 
@@ -430,6 +493,7 @@ def generate_agent_stream(user_input: str, history: List[Dict[str, str]] = None)
 
             elif event_type == "done":
                 final_usage = event.get("usage", {})
+                _save_dialogue(user_input, accumulated_content, agent_mode=True, tool_calls=tool_call_history)
                 unload_rag()
                 yield f"data: {json.dumps({'type': 'done', 'tool_calls': tool_call_history, 'usage': final_usage}, ensure_ascii=False)}\n\n"
 
@@ -437,6 +501,56 @@ def generate_agent_stream(user_input: str, history: List[Dict[str, str]] = None)
         print(f"[Agent Stream] 错误: {exc}")
         unload_rag()
         yield f"data: {json.dumps({'type': 'error', 'message': str(exc)}, ensure_ascii=False)}\n\n"
+
+
+def _save_dialogue(user_input: str, ai_response: str, agent_mode: bool = False, tool_calls: list = None):
+    day = datetime.now().strftime("%Y-%m-%d")
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    HISTORY_DIR.mkdir(exist_ok=True)
+    log_file = HISTORY_DIR / f"dialogue_{day}.md"
+    is_new = not log_file.exists()
+
+    mode_tag = "🤖 Agent" if agent_mode else "💬 普通"
+    
+    with log_file.open("a", encoding="utf-8") as f:
+        if is_new:
+            f.write(f"# 📖 对话记录 - {day}\n\n")
+            f.write("---\n\n")
+        
+        f.write(f"## {mode_tag} | {timestamp}\n\n")
+        f.write(f"**用户**：\n{user_input}\n\n")
+        
+        if agent_mode and tool_calls:
+            f.write(f"**纳西妲的思考过程**：\n\n")
+            for i, tc in enumerate(tool_calls, 1):
+                tool_name = tc.get("tool", "unknown")
+                args = tc.get("args", {})
+                result = tc.get("result", {})
+                
+                if tool_name.startswith("memory_"):
+                    if tool_name == "memory_recall":
+                        f.write(f"{i}. 🔍 仔细回想：`{args.get('query', '')}`\n")
+                    elif tool_name == "memory_save":
+                        f.write(f"{i}. 📝 记下：`{args.get('key', '')}`\n")
+                    elif tool_name == "memory_list":
+                        f.write(f"{i}. 📋 翻看记忆列表\n")
+                    elif tool_name == "memory_delete":
+                        f.write(f"{i}. 🗑️ 清理旧信息：`{args.get('key', '')}`\n")
+                    else:
+                        f.write(f"{i}. 🧠 调用 `{tool_name}`\n")
+                elif tool_name == "rag_search":
+                    f.write(f"{i}. 📚 搜索知识库：`{args.get('query', '')}`\n")
+                elif tool_name == "read_file":
+                    f.write(f"{i}. 📄 读取文件：`{args.get('path', '')}`\n")
+                elif tool_name == "write_file":
+                    f.write(f"{i}. ✏️ 写入文件：`{args.get('path', '')}`\n")
+                else:
+                    f.write(f"{i}. 🔧 调用 `{tool_name}`\n")
+            
+            f.write("\n**纳西妲**：\n")
+        
+        f.write(f"{ai_response}\n\n")
+        f.write("---\n\n")
 
 
 @app.route("/api/ask", methods=["POST"])

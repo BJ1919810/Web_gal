@@ -14,17 +14,18 @@ from sentence_transformers import CrossEncoder, SentenceTransformer
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_DIR = BASE_DIR / "models"
 KNOWLEDGE_DIR = BASE_DIR / "knowledge"
+HISTORY_DIR = BASE_DIR / "history"
 CHROMA_DIR = BASE_DIR / "chroma_db"
 HASH_FILE = KNOWLEDGE_DIR / ".hash.json"
 
 EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 RERANK_MODEL = "BAAI/bge-reranker-base"
-MEMORY_MD_NAME = "MEMORY.md"
+PROFILE_MD_NAME = "PROFILE.md"
 
 
 class RAGSystem:
-    def __init__(self, knowledge_dir: Path = KNOWLEDGE_DIR):
-        self.knowledge_dir = Path(knowledge_dir)
+    def __init__(self, dirs: List[Path] = None):
+        self.data_dirs = dirs or [KNOWLEDGE_DIR, HISTORY_DIR]
         self.embedding_model: Optional[SentenceTransformer] = None
         self.reranker: Optional[CrossEncoder] = None
         self.chroma_client = None
@@ -32,24 +33,23 @@ class RAGSystem:
         self.initialized = False
 
     def _iter_knowledge_files(self) -> List[Path]:
-        if not self.knowledge_dir.is_dir():
-            return []
         files = []
-        for path in sorted(self.knowledge_dir.iterdir(), key=lambda p: p.name):
-            if not path.is_file():
+        for data_dir in self.data_dirs:
+            if not data_dir.is_dir():
                 continue
-            if path.name == ".hash.json":
-                continue
-            if path.suffix not in {".txt", ".md", ".json"}:
-                continue
-            if path.name == MEMORY_MD_NAME:
-                continue
-            files.append(path)
+            for path in sorted(data_dir.iterdir(), key=lambda p: p.name):
+                if not path.is_file():
+                    continue
+                if path.name in (".hash.json", PROFILE_MD_NAME):
+                    continue
+                if path.suffix not in {".txt", ".md", ".json"}:
+                    continue
+                files.append(path)
         return files
 
     @staticmethod
     def _file_source_type(filename: str) -> str:
-        if re.fullmatch(r"dialogue_\d{4}-\d{2}-\d{2}\.txt", filename):
+        if re.fullmatch(r"dialogue_\d{4}-\d{2}-\d{2}\.(txt|md)", filename):
             return "dialogue"
         return "knowledge"
 
@@ -326,6 +326,52 @@ class RAGSystem:
         context = self.search_context(query, dialogue_top_k=min(2, top_k), knowledge_top_k=top_k)
         return context["all"][:top_k]
 
+    def add_documents(self, file_paths: List[Path]) -> Dict[str, int]:
+        if self.embedding_model is None:
+            return {"success": False, "error": "embedding model not loaded"}
+        if self.collection is None:
+            return {"success": False, "error": "chroma collection not initialized"}
+
+        documents = []
+        ids = []
+        metadatas = []
+        indexed_count = 0
+
+        for path in file_paths:
+            if not path.is_file():
+                continue
+            try:
+                content = path.read_text(encoding="utf-8")
+            except Exception:
+                continue
+            chunks = self.semantic_chunk(content)
+            source_type = self._file_source_type(path.name)
+            for idx, chunk in enumerate(chunks):
+                doc_id = f"dynamic#{path.name}#{idx}"
+                if self.collection.get(ids=[doc_id]).get("ids"):
+                    continue
+                documents.append(chunk)
+                ids.append(doc_id)
+                metadatas.append({
+                    "source": path.name,
+                    "chunk_id": idx,
+                    "source_type": source_type,
+                })
+            indexed_count += len(chunks)
+
+        if not documents:
+            return {"success": True, "indexed": 0, "message": "no new documents to index"}
+
+        print(f"[RAG] 正在索引 {len(documents)} 个新文档块")
+        embeddings = self.embedding_model.encode(documents, normalize_embeddings=True)
+        self.collection.add(
+            ids=ids,
+            documents=documents,
+            embeddings=embeddings.tolist(),
+            metadatas=metadatas,
+        )
+        return {"success": True, "indexed": len(documents)}
+
 
 rag_system = RAGSystem()
 
@@ -340,6 +386,10 @@ def search_context(query: str, dialogue_top_k: int = 3, knowledge_top_k: int = 4
 
 def search_knowledge(query: str, top_k: int = 7):
     return rag_system.search_knowledge(query, top_k=top_k)
+
+
+def add_documents(file_paths: List[Path]):
+    return rag_system.add_documents(file_paths)
 
 
 def unload_rag():
