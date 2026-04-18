@@ -46,6 +46,7 @@ const DOM = {
     optionToken: null,
     optionLog: null,
     toolCallDisplay: null,
+    toolCallTimer: null,
     tokenPanel: null,
     logPanel: null,
     logContent: null,
@@ -353,6 +354,18 @@ function displayToolCalls(toolCalls) {
 
     if (!DOM.toolCallDisplay) return;
     DOM.toolCallDisplay.classList.add('show');
+
+    if (DOM.toolCallTimer) {
+        clearTimeout(DOM.toolCallTimer);
+        DOM.toolCallTimer = null;
+    }
+
+    const hasError = toolCalls.some(call => call.result && call.result.success === false);
+    const delay = hasError ? 10000 : 5000;
+    DOM.toolCallTimer = setTimeout(() => {
+        if (DOM.toolCallDisplay) DOM.toolCallDisplay.classList.remove('show');
+        DOM.toolCallTimer = null;
+    }, delay);
     let html = '<ul>';
 
     for (const call of toolCalls) {

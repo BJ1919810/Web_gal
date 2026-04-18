@@ -1,5 +1,5 @@
+import html
 import json
-import os
 import re
 import subprocess
 from pathlib import Path
@@ -264,6 +264,152 @@ def execute_command(command: str, working_dir: Optional[str] = None) -> Dict[str
     except Exception as exc:
         return {"success": False, "error": f"执行失败: {exc}"}
 
+def web_fetch(url: str) -> Dict[str, Any]:
+    """获取网页内容并返回。如果是文件URL则下载到workspace。"""
+    try:
+        import requests
+        from urllib.parse import urlparse
+        from pathlib import Path
+
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        parsed = urlparse(url)
+        ext = Path(parsed.path).suffix.lower()
+        if ext in {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}:
+            resp = requests.get(url, headers=headers, timeout=15, allow_redirects=True)
+            if resp.status_code == 200 and len(resp.content) > 1000:
+                safe_name = re.sub(r'[^\w\u4e00-\u9fff-]', '_', Path(parsed.path).stem)[:50]
+                filename = f"{safe_name}{ext}"
+                filepath = WORKSPACE_DIR / filename
+                filepath.write_bytes(resp.content)
+                return {"success": True, "type": "file", "path": str(filepath), "message": f"已下载到 {filepath}"}
+            return {"success": False, "error": f"下载失败，状态码: {resp.status_code}"}
+        resp = requests.get(url, headers=headers, timeout=15)
+        if resp.status_code == 200:
+            content = resp.text[:8000]
+            return {"success": True, "type": "html", "url": url, "content": content}
+        return {"success": False, "error": f"请求失败，状态码: {resp.status_code}"}
+    except Exception as exc:
+        return {"success": False, "error": f"获取失败: {exc}"}
+
+def web_search(query: str, search_type: str = "general", num_results: int = 5, size: str = "medium") -> Dict[str, Any]:
+    """搜索网络获取信息。图片搜索会下载图片到 workspace/images/"""
+    size_filter = {"small": "filterui:imagesize-small", "medium": "filterui:imagesize-medium", "large": "filterui:imagesize-large", "wallpaper": "filterui:imagesize-wallpaper"}.get(size, "")
+    try:
+        import requests
+        from urllib.parse import quote, urlparse
+        from ddgs import DDGS
+
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+
+        if search_type == "image":
+            images_dir = WORKSPACE_DIR / "images"
+            images_dir.mkdir(parents=True, exist_ok=True)
+            safe_name = re.sub(r'[^\w\u4e00-\u9fff-]', '_', query)[:50]
+            saved_paths = []
+            thumbnail_keywords = ["th.jpg", "th.png", "thumbs", "thumbnail", "/small/", "/preview/", "/thumb/", "_th.", "-th."]
+            page_size = 50
+            pages_needed = (num_results + page_size - 1) // page_size
+            all_urls = []
+            for page in range(pages_needed):
+                first_idx = page * page_size + 1
+                q = quote(query)
+                if size_filter:
+                    page_url = f"https://cn.bing.com/images/search?q={q}&qft={size_filter}&first={first_idx}&count={page_size}"
+                else:
+                    page_url = f"https://cn.bing.com/images/search?q={q}&first={first_idx}&count={page_size}"
+                try:
+                    resp = requests.get(page_url, headers=headers, timeout=10)
+                    if resp.status_code == 200:
+                        m_attrs = re.findall(r'm="([^"]+)"', resp.text)
+                        for m_val in m_attrs:
+                            try:
+                                unescaped = html.unescape(m_val)
+                                m_data = json.loads(unescaped)
+                                murl = m_data.get("murl", "") if isinstance(m_data, dict) else ""
+                                if murl and murl.startswith("http") and len(murl) > 20:
+                                    if not any(kw in murl.lower() for kw in thumbnail_keywords):
+                                        all_urls.append(murl)
+                            except Exception:
+                                continue
+                    if len(all_urls) >= num_results:
+                        break
+                except Exception:
+                    continue
+            all_urls = list(dict.fromkeys(all_urls))[:num_results]
+            for i, img_url in enumerate(all_urls):
+                try:
+                    img_resp = requests.get(img_url, headers=headers, timeout=15, allow_redirects=True)
+                    if img_resp.status_code == 200 and len(img_resp.content) > 5000:
+                        ext = re.search(r'\.(jpg|jpeg|png|gif|webp|bmp)', img_url, re.I)
+                        ext = ext.group(1) if ext else 'jpg'
+                        filename = f"{safe_name}_{i+1}.{ext}"
+                        filepath = images_dir / filename
+                        filepath.write_bytes(img_resp.content)
+                        saved_paths.append(str(filepath))
+                except Exception:
+                    continue
+            return {
+                "success": True,
+                "query": query,
+                "type": "image",
+                "saved": saved_paths,
+                "count": len(saved_paths),
+                "message": f"已下载 {len(saved_paths)} 张图片到 workspace/images/" if saved_paths else "未找到图片"
+            }
+
+        if search_type == "news":
+            try:
+                with DDGS() as ddgs:
+                    results = []
+                    for r in ddgs.news(query, max_results=num_results):
+                        results.append({
+                            "title": r.get("title", ""),
+                            "url": r.get("url", ""),
+                            "date": r.get("date", ""),
+                            "body": r.get("body", "")[:200]
+                        })
+                    return {
+                        "success": True,
+                        "query": query,
+                        "type": "news",
+                        "results": results,
+                        "message": f"找到 {len(results)} 条新闻"
+                    }
+            except ImportError:
+                return {"success": False, "error": "需要安装 duckduckgo-search: pip install duckduckgo-search"}
+            except Exception as exc:
+                return {"success": False, "error": f"新闻搜索失败: {exc}"}
+
+        try:
+            with DDGS() as ddgs:
+                results = []
+                for r in ddgs.text(query, max_results=num_results):
+                    results.append({
+                        "title": r.get("title", ""),
+                        "href": r.get("href", ""),
+                        "body": r.get("body", "")[:300]
+                    })
+                return {
+                    "success": True,
+                    "query": query,
+                    "type": "general",
+                    "results": results,
+                    "message": f"找到 {len(results)} 条结果"
+                }
+        except ImportError:
+            return {"success": False, "error": "需要安装 duckduckgo-search: pip install duckduckgo-search"}
+        except Exception as exc:
+            return {"success": False, "error": f"搜索失败: {exc}"}
+
+    except ImportError:
+        return {"success": False, "error": "web_search功能需要安装requests库，请运行: pip install requests"}
+    except Exception as exc:
+        return {"success": False, "error": f"搜索失败: {exc}"}
+
 TOOLS = {
     "read_file": {
         "name": "read_file",
@@ -500,6 +646,54 @@ TOOLS = {
             "required": ["command"],
         },
     },
+    "web_search": {
+        "name": "web_search",
+        "description": "搜索网络获取大致信息。"
+        "使用场景：需要查询实时信息、新闻、天气预报、百科知识等网络资源时使用。"
+        "配合web_fetch工具可以获取详细内容。"
+        "图片搜索会下载图片到 workspace/images/ 目录，下载完成后直接说‘图片已下载’，无需一一列出。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "搜索关键词",
+                },
+                "search_type": {
+                    "type": "string",
+                    "description": "搜索类型：general（通用搜索）/ news（新闻）/ image（图片）",
+                    "enum": ["general", "news", "image"],
+                    "default": "general",
+                },
+                "num_results": {
+                    "type": "integer",
+                    "description": "返回结果数量，默认5条",
+                    "default": 5,
+                },
+                "size": {
+                    "type": "string",
+                    "description": "图片尺寸：small / medium / large / wallpaper（仅图片搜索有效）",
+                    "enum": ["small", "medium", "large", "wallpaper"],
+                    "default": "medium",
+                },
+            },
+            "required": ["query"],
+        },
+    },
+    "web_fetch": {
+        "name": "web_fetch",
+        "description": "获取指定URL的网页内容。如果是图片文件则下载到workspace。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "要获取的网页或文件URL",
+                },
+            },
+            "required": ["url"],
+        },
+    },
 }
 
 TOOL_FUNCTIONS = {
@@ -514,6 +708,8 @@ TOOL_FUNCTIONS = {
     "memory_list": memory_list,
     "memory_delete": memory_delete,
     "execute_command": execute_command,
+    "web_search": web_search,
+    "web_fetch": web_fetch,
 }
 
 def get_tools_schema() -> List[Dict]:
