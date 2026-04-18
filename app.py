@@ -28,12 +28,14 @@ LIVE2D_DIR = BASE_DIR / "live2d"
 LOG_DIR = BASE_DIR / "log"
 HISTORY_DIR = BASE_DIR / "history"
 MEMORY_DIR = BASE_DIR / "memory"
+CONVERSATION_DIR = BASE_DIR / "conversations"
 TMP_TXT_PATH = LIVE2D_DIR / "tmp.txt"
 
 WORKSPACE_DIR.mkdir(exist_ok=True)
 LOG_DIR.mkdir(exist_ok=True)
 HISTORY_DIR.mkdir(exist_ok=True)
 MEMORY_DIR.mkdir(exist_ok=True)
+CONVERSATION_DIR.mkdir(exist_ok=True)
 
 API_URL = os.getenv("DEEPSEEK_API_URL", "https://api.deepseek.com/v1/chat/completions")
 API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
@@ -51,9 +53,7 @@ def _load_core_memory() -> str:
             pass
     return ""
 
-CORE_MEMORY = _load_core_memory()
-
-AGENT_SYSTEM_PROMPT = (
+BASE_AGENT_PROMPT = (
     "你是一位擅长角色扮演的Agent。\n\n"
     "回复时在情感语句开头加标签，如[星星]、[好奇]。\n"
     "标签：祈祷、发光、翻花绳、好奇、泪、脸黑、脸红、生气、星星。\n\n"
@@ -67,20 +67,26 @@ AGENT_SYSTEM_PROMPT = (
     "其他人或不重要的信息才用memory_save工具保存到JSON文件。\n"
     "信息过时或错误时可清理。\n"
     "工具调用保持角色沉浸感：查记忆说'让我想想'，存记忆说'我记下来'。\n"
-    
+
     "流程：理解需求→召回相关记忆→直接调用工具→填入参数→执行→根据结果决定下一步操作→（重复直到完成任务）→简要总结。"
     "多步任务请逐步进行。"
 )
 
-NORMAL_SYSTEM_PROMPT = (
+BASE_NORMAL_PROMPT = (
     "你是一位擅长角色扮演的聊天助手。\n"
     "回复时在情感语句开头加标签，如[星星]、[好奇]。\n"
     "标签：祈祷、发光、翻花绳、好奇、泪、脸黑、脸红、生气、星星。"
 )
 
-if CORE_MEMORY:
-    AGENT_SYSTEM_PROMPT += "\n\n【memory/PROFILE.md】\n" + CORE_MEMORY
-    NORMAL_SYSTEM_PROMPT += "\n\n【memory/PROFILE.md】\n" + CORE_MEMORY
+def _build_system_prompt(agent_mode: bool, now: str = None) -> str:
+    core = _load_core_memory()
+    if now is None:
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    base = BASE_AGENT_PROMPT if agent_mode else BASE_NORMAL_PROMPT
+    if core:
+        base += f"\n\n【memory/PROFILE.md】\n{core}"
+    base += f"\n\n【当前时间】{now}"
+    return base
 
 app = Flask(__name__)
 
@@ -242,7 +248,8 @@ def _chat_completion(
     model: Optional[str] = None,
     temperature: float = 1.0,
     max_tokens: Optional[int] = None,
-) -> Tuple[str, Dict[str, int]]:
+    tools: Optional[List[Dict[str, Any]]] = None,
+) -> Tuple[Dict[str, Any], Dict[str, int]]:
     if not API_KEY:
         raise ValueError("API密钥未设置")
     headers = {
@@ -256,34 +263,6 @@ def _chat_completion(
     }
     if max_tokens is not None:
         payload["max_tokens"] = max_tokens
-    response = requests.post(API_URL, headers=headers, json=payload, timeout=120)
-    if not response.ok:
-        raise Exception(f"API请求失败: {response.status_code} {response.text}")
-    data = response.json()
-    if "error" in data:
-        raise Exception(f"API错误: {data['error']}")
-    choices = data.get("choices", [])
-    if not choices:
-        raise Exception("API返回空 choices")
-    usage = data.get("usage", {})
-    return choices[0].get("message", {}).get("content", ""), usage
-
-
-def _agent_chat_completion(
-    messages: List[Dict[str, Any]],
-    tools: Optional[List[Dict[str, Any]]] = None,
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, int]]:
-    if not API_KEY:
-        raise ValueError("API密钥未设置")
-    headers = {
-        "Authorization": f"Bearer {API_KEY}",
-        "Content-Type": "application/json",
-    }
-    payload: Dict[str, Any] = {
-        "model": AGENT_MODEL_NAME,
-        "messages": messages,
-        "temperature": 0.7,
-    }
     if tools:
         payload["tools"] = tools
     response = requests.post(API_URL, headers=headers, json=payload, timeout=120)
@@ -296,9 +275,17 @@ def _agent_chat_completion(
     if not choices:
         raise Exception("API返回空 choices")
     message = choices[0].get("message", {})
-    messages.append(message)
     usage = data.get("usage", {})
-    return messages, message.get("tool_calls", []), usage
+    return message, usage
+
+
+def _agent_chat_completion(
+    messages: List[Dict[str, Any]],
+    tools: Optional[List[Dict[str, Any]]] = None,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, int]]:
+    message, usage = _chat_completion(messages, model=AGENT_MODEL_NAME, temperature=0.7, tools=tools)
+    messages.append(message)
+    return messages, message.get("tool_calls", []) or [], usage
 
 
 def _log_cot(step: int, user_input: str, messages: List[Dict], tool_calls: List[Dict], round_usage: list = None):
@@ -327,9 +314,74 @@ def _log_cot(step: int, user_input: str, messages: List[Dict], tool_calls: List[
         f.write(json.dumps(entry, ensure_ascii=False, indent=2) + "\n\n")
 
 
+def _get_next_conversation_id() -> int:
+    existing = sorted([int(f.stem.split("_")[1]) for f in CONVERSATION_DIR.glob("conv_*.json") if f.stem.split("_")[1].isdigit()])
+    return existing[-1] + 1 if existing else 1
+
+
+def _save_conversation(conv_id: int, messages: List[Dict], user_input: str, ai_response: str, agent_mode: bool = False, tool_calls: list = None, usage: dict = None):
+    conv_file = CONVERSATION_DIR / f"conv_{conv_id}.json"
+    if conv_file.exists():
+        try:
+            data = json.loads(conv_file.read_text(encoding="utf-8"))
+            if agent_mode:
+                data["mode"] = "agent"
+            data["messages"] = messages
+            data["summary"] = user_input[:50] + ("..." if len(user_input) > 50 else "")
+            data["last_message"] = ai_response[:100] + ("..." if len(ai_response) > 100 else "")
+            data["tool_calls"] = tool_calls or []
+            data["usage"] = usage or {}
+            conv_file.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            return conv_id
+        except Exception:
+            pass
+    conversation_data = {
+        "id": conv_id,
+        "created_at": datetime.now().isoformat(),
+        "mode": "agent" if agent_mode else "normal",
+        "messages": messages,
+        "summary": user_input[:50] + ("..." if len(user_input) > 50 else ""),
+        "last_message": ai_response[:100] + ("..." if len(ai_response) > 100 else ""),
+        "tool_calls": tool_calls or [],
+        "usage": usage or {},
+    }
+    conv_file.write_text(json.dumps(conversation_data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return conv_id
+
+
+def _load_conversation(conv_id: int) -> Optional[Dict]:
+    conv_file = CONVERSATION_DIR / f"conv_{conv_id}.json"
+    if not conv_file.exists():
+        return None
+    try:
+        return json.loads(conv_file.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _list_conversations() -> List[Dict]:
+    conversations = []
+    for f in sorted(CONVERSATION_DIR.glob("conv_*.json")):
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+            messages_count = len([m for m in data.get("messages", []) if m.get("role") in ("user", "assistant")])
+            conversations.append({
+                "id": data["id"],
+                "created_at": data["created_at"],
+                "mode": data["mode"],
+                "summary": data["summary"],
+                "last_message": data["last_message"],
+                "messages_count": messages_count,
+            })
+        except Exception:
+            continue
+    return conversations
+
+
 def run_agent_loop_stream(user_input: str, history: List[Dict[str, str]] = None):
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     messages: List[Dict[str, Any]] = [
-        {"role": "system", "content": AGENT_SYSTEM_PROMPT},
+        {"role": "system", "content": _build_system_prompt(agent_mode=True, now=now)},
     ]
     if history:
         for h in history:
@@ -397,15 +449,19 @@ def run_agent_loop_stream(user_input: str, history: List[Dict[str, str]] = None)
     yield {"type": "done", "tool_calls": tool_call_history, "usage": final_usage}
 
 
-def _normal_chat(user_input: str, history: List[Dict[str, str]] = None) -> Tuple[str, Dict[str, int]]:
-    messages = [{"role": "system", "content": NORMAL_SYSTEM_PROMPT}]
+def _normal_chat(user_input: str, history: List[Dict[str, str]] = None, conv_id: int = None) -> Tuple[str, Dict[str, int], int]:
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    messages = [{"role": "system", "content": _build_system_prompt(agent_mode=False, now=now)}]
     if history:
         for h in history:
             messages.append(h)
     messages.append({"role": "user", "content": user_input})
-    reply, usage = _chat_completion(messages, model=MODEL_NAME, temperature=1.0)
-    _save_dialogue(user_input, reply, agent_mode=False)
-    return reply, usage
+    message, usage = _chat_completion(messages, model=MODEL_NAME, temperature=1.0)
+    reply = message.get("content", "") if isinstance(message, dict) else message
+    messages.append({"role": "assistant", "content": reply})
+    save_messages = [m for m in messages if m["role"] != "system"]
+    conv_id = _save_dialogue(user_input, reply, agent_mode=False, messages=save_messages, usage=usage, conv_id=conv_id)
+    return reply, usage, conv_id
 
 
 @app.route("/")
@@ -441,6 +497,7 @@ def chat():
     user_input = data.get("message", "").strip()
     agent_mode = data.get("agent", False)
     history = data.get("history", [])
+    conv_id = data.get("conv_id")
 
     if not user_input:
         return jsonify({"error": "消息不能为空"}), 400
@@ -448,11 +505,11 @@ def chat():
     try:
         if agent_mode:
             return Response(
-                stream_with_context(generate_agent_stream(user_input, history)),
+                stream_with_context(generate_agent_stream(user_input, history, conv_id)),
                 mimetype="application/json"
             )
         else:
-            reply, usage = _normal_chat(user_input, history)
+            reply, usage, new_conv_id = _normal_chat(user_input, history, conv_id)
             mode = "normal"
             tool_call_history = []
 
@@ -461,15 +518,17 @@ def chat():
                 "mode": mode,
                 "tool_calls": tool_call_history,
                 "usage": usage,
+                "conv_id": new_conv_id,
             })
     except Exception as exc:
         print(f"[Chat] 请求失败: {exc}")
         return jsonify({"reply": "出错了，请稍后再试。", "error": str(exc)}), 500
 
 
-def generate_agent_stream(user_input: str, history: List[Dict[str, str]] = None):
+def generate_agent_stream(user_input: str, history: List[Dict[str, str]] = None, conv_id: int = None):
     tool_call_history = []
     accumulated_content = ""
+    final_messages = []
 
     try:
         for event in run_agent_loop_stream(user_input, history):
@@ -477,7 +536,6 @@ def generate_agent_stream(user_input: str, history: List[Dict[str, str]] = None)
 
             if event_type == "partial":
                 content = event.get("content", "")
-                accumulated_content += content
                 yield f"data: {json.dumps({'type': 'partial', 'content': content}, ensure_ascii=False)}\n\n"
 
             elif event_type == "tool_call":
@@ -494,9 +552,10 @@ def generate_agent_stream(user_input: str, history: List[Dict[str, str]] = None)
 
             elif event_type == "done":
                 final_usage = event.get("usage", {})
-                _save_dialogue(user_input, accumulated_content, agent_mode=True, tool_calls=tool_call_history)
+                save_messages = history + [{"role": "user", "content": user_input}, {"role": "assistant", "content": accumulated_content}] if history else [{"role": "user", "content": user_input}, {"role": "assistant", "content": accumulated_content}]
+                new_conv_id = _save_dialogue(user_input, accumulated_content, agent_mode=True, tool_calls=tool_call_history, messages=save_messages, usage=final_usage, conv_id=conv_id)
                 unload_rag()
-                yield f"data: {json.dumps({'type': 'done', 'tool_calls': tool_call_history, 'usage': final_usage}, ensure_ascii=False)}\n\n"
+                yield f"data: {json.dumps({'type': 'done', 'tool_calls': tool_call_history, 'usage': final_usage, 'conv_id': new_conv_id}, ensure_ascii=False)}\n\n"
 
     except Exception as exc:
         print(f"[Agent Stream] 错误: {exc}")
@@ -504,7 +563,30 @@ def generate_agent_stream(user_input: str, history: List[Dict[str, str]] = None)
         yield f"data: {json.dumps({'type': 'error', 'message': str(exc)}, ensure_ascii=False)}\n\n"
 
 
-def _save_dialogue(user_input: str, ai_response: str, agent_mode: bool = False, tool_calls: list = None):
+@app.route("/api/conversations", methods=["GET"])
+def list_conversations():
+    conversations = _list_conversations()
+    return jsonify({"conversations": conversations})
+
+
+@app.route("/api/conversation/<int:conv_id>", methods=["GET"])
+def get_conversation(conv_id: int):
+    conv = _load_conversation(conv_id)
+    if not conv:
+        return jsonify({"error": "对话不存在"}), 404
+    return jsonify(conv)
+
+
+@app.route("/api/conversation/<int:conv_id>", methods=["DELETE"])
+def delete_conversation(conv_id: int):
+    conv_file = CONVERSATION_DIR / f"conv_{conv_id}.json"
+    if not conv_file.exists():
+        return jsonify({"error": "对话不存在"}), 404
+    conv_file.unlink()
+    return jsonify({"success": True})
+
+
+def _save_dialogue(user_input: str, ai_response: str, agent_mode: bool = False, tool_calls: list = None, messages: list = None, usage: dict = None, conv_id: int = None):
     day = datetime.now().strftime("%Y-%m-%d")
     timestamp = datetime.now().strftime("%H:%M:%S")
     HISTORY_DIR.mkdir(exist_ok=True)
@@ -521,37 +603,46 @@ def _save_dialogue(user_input: str, ai_response: str, agent_mode: bool = False, 
         f.write(f"## {mode_tag} | {timestamp}\n\n")
         f.write(f"**用户**：\n{user_input}\n\n")
         
-        if agent_mode and tool_calls:
-            f.write(f"**纳西妲的思考过程**：\n\n")
-            for i, tc in enumerate(tool_calls, 1):
-                tool_name = tc.get("tool", "unknown")
-                args = tc.get("args", {})
-                result = tc.get("result", {})
-                
-                if tool_name.startswith("memory_"):
-                    if tool_name == "memory_recall":
-                        f.write(f"{i}. 🔍 仔细回想：`{args.get('query', '')}`\n")
-                    elif tool_name == "memory_save":
-                        f.write(f"{i}. 📝 记下：`{args.get('key', '')}`\n")
-                    elif tool_name == "memory_list":
-                        f.write(f"{i}. 📋 翻看记忆列表\n")
-                    elif tool_name == "memory_delete":
-                        f.write(f"{i}. 🗑️ 清理旧信息：`{args.get('key', '')}`\n")
+        if agent_mode:
+            if tool_calls:
+                f.write(f"**纳西妲的思考过程**：\n\n")
+                for i, tc in enumerate(tool_calls, 1):
+                    tool_name = tc.get("tool", "unknown")
+                    args = tc.get("args", {})
+                    result = tc.get("result", {})
+
+                    if tool_name.startswith("memory_"):
+                        if tool_name == "memory_recall":
+                            f.write(f"{i}. 🔍 仔细回想：`{args.get('query', '')}`\n")
+                        elif tool_name == "memory_save":
+                            f.write(f"{i}. 📝 记下：`{args.get('key', '')}`\n")
+                        elif tool_name == "memory_list":
+                            f.write(f"{i}. 📋 翻看记忆列表\n")
+                        elif tool_name == "memory_delete":
+                            f.write(f"{i}. 🗑️ 清理旧信息：`{args.get('key', '')}`\n")
+                        else:
+                            f.write(f"{i}. 🧠 调用 `{tool_name}`\n")
+                    elif tool_name == "rag_search":
+                        f.write(f"{i}. 📚 搜索知识库：`{args.get('query', '')}`\n")
+                    elif tool_name == "read_file":
+                        f.write(f"{i}. 📄 读取文件：`{args.get('path', '')}`\n")
+                    elif tool_name == "write_file":
+                        f.write(f"{i}. ✏️ 写入文件：`{args.get('path', '')}`\n")
                     else:
-                        f.write(f"{i}. 🧠 调用 `{tool_name}`\n")
-                elif tool_name == "rag_search":
-                    f.write(f"{i}. 📚 搜索知识库：`{args.get('query', '')}`\n")
-                elif tool_name == "read_file":
-                    f.write(f"{i}. 📄 读取文件：`{args.get('path', '')}`\n")
-                elif tool_name == "write_file":
-                    f.write(f"{i}. ✏️ 写入文件：`{args.get('path', '')}`\n")
-                else:
-                    f.write(f"{i}. 🔧 调用 `{tool_name}`\n")
-            
-            f.write("\n**纳西妲**：\n")
-        
+                        f.write(f"{i}. 🔧 调用 `{tool_name}`\n")
+
+                f.write("\n**纳西妲**：\n")
+            else:
+                f.write(f"**纳西妲**：\n")
+        else:
+            f.write(f"**纳西妲**：\n")
+
         f.write(f"{ai_response}\n\n")
         f.write("---\n\n")
+    if conv_id is None:
+        conv_id = _get_next_conversation_id()
+    _save_conversation(conv_id, messages or [], user_input, ai_response, agent_mode, tool_calls, usage)
+    return conv_id
 
 
 @app.route("/api/ask", methods=["POST"])
@@ -569,13 +660,24 @@ def tts():
     audio_data = get_tts_audio_data(text)
     if not audio_data:
         return jsonify({"error": "TTS服务不可用"}), 503
-    return send_file(
-        io.BytesIO(audio_data),
-        mimetype="audio/wav",
-        as_attachment=False,
-        download_name="audio.wav"
-    )
+    return send_file(io.BytesIO(audio_data), mimetype="audio/wav")
+
+
+@app.route("/api/tts/stream", methods=["POST"])
+def tts_stream():
+    text = (request.json or {}).get("text", "").strip()
+    if not text:
+        return jsonify({"error": "文本不能为空"}), 400
+    audio_data = get_tts_audio_data(text)
+    if not audio_data:
+        return jsonify({"error": "TTS服务不可用"}), 503
+    return send_file(io.BytesIO(audio_data), mimetype="audio/wav")
+
+
+@app.route("/static/<path:path>")
+def serve_static(path):
+    return send_from_directory(str(BASE_DIR / "static"), path)
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(host="0.0.0.0", port=5000, debug=False)

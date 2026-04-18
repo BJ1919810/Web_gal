@@ -20,6 +20,7 @@ const AppState = {
     ttsFailedTexts: new Set(),
     isWaitingForAudio: false,
     isAgentMode: false,
+    conversationId: null,
     currentToolCalls: [],
     chatHistory: [],
     totalTokensUsed: {
@@ -41,6 +42,7 @@ const DOM = {
     userInput: null,
     submitBtn: null,
     optionAgent: null,
+    optionConversation: null,
     optionToken: null,
     optionLog: null,
     toolCallDisplay: null,
@@ -49,7 +51,12 @@ const DOM = {
     logContent: null,
     tokenPrompt: null,
     tokenCompletion: null,
-    tokenTotal: null
+    tokenTotal: null,
+    conversationPanel: null,
+    conversationList: null,
+    conversationViewer: null,
+    conversationTitle: null,
+    conversationMessages: null
 };
 
 /**
@@ -74,6 +81,7 @@ async function initApp() {
         initBGM();
         initModeSwitch();
         initLogPanel();
+        initConversationPanel();
 
         console.log('WebGAL应用初始化完成');
     } catch (error) {
@@ -92,6 +100,7 @@ function cacheDOM() {
     DOM.userInput = document.getElementById('user-input');
     DOM.submitBtn = document.getElementById('submit-btn');
     DOM.optionAgent = document.getElementById('option-agent');
+    DOM.optionConversation = document.getElementById('option-conversation');
     DOM.optionToken = document.getElementById('option-token');
     DOM.optionLog = document.getElementById('option-log');
     DOM.toolCallDisplay = document.getElementById('tool-call-display');
@@ -101,6 +110,11 @@ function cacheDOM() {
     DOM.tokenPrompt = document.getElementById('token-prompt');
     DOM.tokenCompletion = document.getElementById('token-completion');
     DOM.tokenTotal = document.getElementById('token-total');
+    DOM.conversationPanel = document.getElementById('conversation-panel');
+    DOM.conversationList = document.getElementById('conversation-list');
+    DOM.conversationViewer = document.getElementById('conversation-viewer');
+    DOM.conversationTitle = document.getElementById('conversation-title');
+    DOM.conversationMessages = document.getElementById('conversation-messages');
 }
 
 function toggleAgentMode() {
@@ -170,6 +184,16 @@ function initLogPanel() {
     });
 }
 
+function initConversationPanel() {
+    if (!DOM.conversationPanel) return;
+
+    DOM.conversationPanel.addEventListener('click', (e) => {
+        if (e.target === DOM.conversationPanel) {
+            DOM.conversationPanel.classList.add('hidden');
+        }
+    });
+}
+
 function addToChatHistory(role, content) {
     AppState.chatHistory.push({
         role,
@@ -205,6 +229,120 @@ function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
+}
+
+function showConversationPanel() {
+    if (DOM.conversationPanel) {
+        DOM.conversationPanel.classList.remove('hidden');
+        DOM.conversationList.classList.remove('hidden');
+        DOM.conversationViewer.classList.add('hidden');
+        loadConversationList();
+    }
+}
+
+function hideConversationPanel() {
+    if (DOM.conversationPanel) {
+        DOM.conversationPanel.classList.add('hidden');
+    }
+}
+
+async function loadConversationList() {
+    if (!DOM.conversationList) return;
+
+    try {
+        const response = await fetch('/api/conversations');
+        const data = await response.json();
+        
+        if (!data.conversations || data.conversations.length === 0) {
+            DOM.conversationList.innerHTML = '<p style="color: #6b8e6b; text-align: center; padding: 20px;">暂无对话记录</p>';
+            return;
+        }
+
+        let html = '';
+        for (const conv of data.conversations.reverse()) {
+            const modeClass = conv.mode === 'agent' ? 'agent' : '';
+            const modeText = conv.mode === 'agent' ? 'Agent' : '普通';
+            const createdTime = new Date(conv.created_at).toLocaleString('zh-CN');
+            
+            html += `
+                <div class="conversation-item" onclick="loadConversation(${conv.id})">
+                    <div class="conversation-item-header">
+                        <span class="conversation-id">#${conv.id}</span>
+                        <span class="conversation-mode ${modeClass}">${modeText}</span>
+                    </div>
+                    <div class="conversation-summary">${escapeHtml(conv.summary)}</div>
+                    <div class="conversation-meta">
+                        <span>${createdTime}</span>
+                        <span>${conv.messages_count || 0} 条消息</span>
+                    </div>
+                </div>
+            `;
+        }
+        DOM.conversationList.innerHTML = html;
+    } catch (error) {
+        console.error('加载对话列表失败:', error);
+        DOM.conversationList.innerHTML = '<p style="color: #ff6b6b; text-align: center; padding: 20px;">加载失败</p>';
+    }
+}
+
+async function loadConversation(convId) {
+    try {
+        const response = await fetch(`/api/conversation/${convId}`);
+        const conv = await response.json();
+
+        if (response.status === 404) {
+            alert('对话不存在');
+            return;
+        }
+
+        hideConversationPanel();
+
+        if (conv.messages && conv.messages.length > 0) {
+            AppState.chatHistory = [];
+            for (const msg of conv.messages) {
+                AppState.chatHistory.push({
+                    role: msg.role,
+                    content: msg.content,
+                    time: msg.time || ''
+                });
+            }
+            const lastAssistant = [...AppState.chatHistory].reverse().find(m => m.role === 'assistant');
+            DOM.dialogue.textContent = lastAssistant ? lastAssistant.content : '';
+        } else {
+            AppState.chatHistory = [];
+            DOM.dialogue.textContent = conv.last_message || '你好，欢迎来到这个世界！';
+        }
+        DOM.userInput.value = '';
+
+        if (conv.usage) {
+            AppState.totalTokensUsed = { ...conv.usage };
+            if (DOM.tokenPrompt) DOM.tokenPrompt.textContent = conv.usage.prompt_tokens || 0;
+            if (DOM.tokenCompletion) DOM.tokenCompletion.textContent = conv.usage.completion_tokens || 0;
+            if (DOM.tokenTotal) DOM.tokenTotal.textContent = conv.usage.total_tokens || 0;
+        }
+    } catch (error) {
+        console.error('加载对话失败:', error);
+    }
+}
+
+function backToConversationList() {
+    DOM.conversationList.classList.remove('hidden');
+    DOM.conversationViewer.classList.add('hidden');
+}
+
+function startNewConversation() {
+    AppState.chatHistory = [];
+    AppState.conversationId = null;
+    if (DOM.dialogue) {
+        DOM.dialogue.textContent = '你好，欢迎来到这个世界！';
+    }
+    if (DOM.userInput) {
+        DOM.userInput.value = '';
+        DOM.userInput.focus();
+    }
+    if (DOM.tokenPrompt) DOM.tokenPrompt.textContent = '0';
+    if (DOM.tokenCompletion) DOM.tokenCompletion.textContent = '0';
+    if (DOM.tokenTotal) DOM.tokenTotal.textContent = '0';
 }
 
 function displayToolCalls(toolCalls) {
@@ -610,7 +748,7 @@ async function handleUserInput() {
  * @param {boolean} append - 是否追加到现有内容后面
  * @param {number} speed - 每个字之间的延迟时间（毫秒）
  */
-function typewriterEffect(element, text, append = false, speed = 50, emotion = null) {
+function typewriterEffect(element, text, append = false, speed = 50) {
     return new Promise(resolve => {
         if (!element) {
             resolve();
@@ -627,10 +765,7 @@ function typewriterEffect(element, text, append = false, speed = 50, emotion = n
         if (!append) {
             element.textContent = '';
         }
-        
-        // 在显示第一个字时触发表情
-        let emotionTriggered = false;
-        
+
         function typeNext() {
             if (index < displayText.length) {
                 // 检查当前字符是否是表情标签的开始
@@ -657,12 +792,6 @@ function typewriterEffect(element, text, append = false, speed = 50, emotion = n
                     // 正常显示字符
                     element.textContent = initialText + displayText.substring(0, index + 1);
                     index++;
-
-                    // 在显示第一个字时触发表情
-                    if (!emotionTriggered && emotion) {
-                        emotionTriggered = true;
-                        applyExpression(emotion);
-                    }
                 }
                 
                 // 检查并应用队列中的表情
@@ -698,26 +827,41 @@ function typewriterEffect(element, text, append = false, speed = 50, emotion = n
 }
 
 /**
+ * 准备history，去重当前正在发送的消息
+ */
+function prepareHistory(currentMessage) {
+    let history = AppState.chatHistory.map(item => ({
+        role: item.role,
+        content: item.content
+    }));
+    if (history.length > 0 && history[history.length - 1].content === currentMessage) {
+        history = history.slice(0, -1);
+    }
+    return history;
+}
+
+/**
  * 获取AI回复
  */
 async function getAIReply(message, agentMode) {
     try {
-        const history = AppState.chatHistory.map(item => ({
-            role: item.role,
-            content: item.content
-        }));
+        const history = prepareHistory(message);
 
         const response = await fetch('/api/ask', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ message, agent: agentMode, history })
+            body: JSON.stringify({ message, agent: agentMode, history, conv_id: AppState.conversationId })
         });
 
         if (!response.ok) {
             throw new Error(`API请求失败: ${response.status}`);
         }
 
-        return await response.json();
+        const data = await response.json();
+        if (data.conv_id) {
+            AppState.conversationId = data.conv_id;
+        }
+        return data;
 
     } catch (error) {
         console.error('获取AI回复失败:', error);
@@ -732,20 +876,16 @@ async function handleAgentModeStream(message) {
     const streamState = {
         toolCalls: [],
         accumulatedReply: '',
-        pendingText: '',
         hasError: false
     };
 
     try {
-        const history = AppState.chatHistory.map(item => ({
-            role: item.role,
-            content: item.content
-        }));
+        const history = prepareHistory(message);
 
         const response = await fetch('/api/chat', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ message, agent: true, history })
+            body: JSON.stringify({ message, agent: true, history, conv_id: AppState.conversationId })
         });
 
         if (!response.ok) {
@@ -781,10 +921,6 @@ async function handleAgentModeStream(message) {
             }
         }
 
-        if (streamState.pendingText) {
-            DOM.dialogue.textContent += streamState.pendingText;
-        }
-
         if (streamState.hasError) {
             throw new Error('Agent模式处理失败');
         }
@@ -809,9 +945,7 @@ function handleStreamEvent(event, state) {
 
     if (type === 'partial') {
         state.accumulatedReply = content;
-        state.pendingText = '';
-        const result = processContentWithEmotions(content, '');
-        DOM.dialogue.textContent = result.display;
+        DOM.dialogue.textContent = processContentWithEmotions(content);
     }
 
     if (type === 'final') {
@@ -830,6 +964,9 @@ function handleStreamEvent(event, state) {
         if (usage) {
             updateTokenDisplay(usage);
         }
+        if (event.conv_id) {
+            AppState.conversationId = event.conv_id;
+        }
         if (finalText) {
             const sequence = createDialogueSequence(finalText);
             if (sequence.length > 0) {
@@ -844,31 +981,21 @@ function handleStreamEvent(event, state) {
     }
 }
 
-function processContentWithEmotionsForElement(text) {
-    const emotionRegex = /\[([^\]]+)\]/g;
-    let match;
-    while ((match = emotionRegex.exec(text)) !== null) {
-        applyExpression(match[1]);
-    }
-}
-
 const VALID_EMOTION_TAGS = ['祈祷', '发光', '翻花绳', '好奇', '泪', '脸黑', '脸红', '生气', '星星'];
 
 function isValidEmotionTag(tag) {
     return VALID_EMOTION_TAGS.includes(tag);
 }
 
-function processContentWithEmotions(text, pending) {
-    const fullText = pending + text;
+function processContentWithEmotions(text) {
     const emotionRegex = /\[([^\]]+)\]/g;
     let lastIndex = 0;
     let match;
     let display = '';
-    let pendingText = '';
 
-    while ((match = emotionRegex.exec(fullText)) !== null) {
+    while ((match = emotionRegex.exec(text)) !== null) {
         if (match.index > lastIndex) {
-            display += fullText.slice(lastIndex, match.index);
+            display += text.slice(lastIndex, match.index);
         }
         if (isValidEmotionTag(match[1])) {
             applyExpression(match[1]);
@@ -878,21 +1005,11 @@ function processContentWithEmotions(text, pending) {
         lastIndex = emotionRegex.lastIndex;
     }
 
-    if (lastIndex < fullText.length) {
-        const remaining = fullText.slice(lastIndex);
-        const openBracket = remaining.lastIndexOf('[');
-        if (openBracket !== -1 && !remaining.includes(']')) {
-            display += remaining.slice(0, openBracket);
-            pendingText = remaining.slice(openBracket);
-        } else {
-            display += remaining;
-            pendingText = '';
-        }
-    } else {
-        pendingText = '';
+    if (lastIndex < text.length) {
+        display += text.slice(lastIndex);
     }
 
-    return { display, pending: pendingText };
+    return display;
 }
 
 function updateToolCallDisplay(toolCalls) {
@@ -1365,7 +1482,7 @@ async function processNextSequenceItem() {
             AppState.currentSequenceIndex++;
             prepareNextAudio(AppState.currentSequenceIndex);
 
-            const typewriterPromise = typewriterEffect(DOM.dialogue, textContent + ' ', false, 50, currentItem.emotion);
+            const typewriterPromise = typewriterEffect(DOM.dialogue, textContent + ' ', false, 50);
             const voicePromise = playVoice(textContent);
             await Promise.all([typewriterPromise, voicePromise]);
         } else if (currentItem.emotion) {
