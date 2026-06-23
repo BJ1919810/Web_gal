@@ -207,3 +207,15 @@ def memory_delete(category: str, key: str, sub_key: str = None) -> Dict[str, Any
         "path": "/".join(full_path),
         "deleted": deleted_value
     }
+
+
+def profile_write(content: str) -> Dict[str, Any]:
+    ensure_memory_file()
+    profile_file = MEMORY_DIR / "PROFILE.md"
+    existed = profile_file.exists()
+    profile_file.write_text(content, encoding="utf-8")
+    return {
+        "success": True,
+        "path": str(profile_file),
+        "action": "updated" if existed else "created"
+    }

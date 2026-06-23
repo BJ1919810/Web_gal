@@ -44,7 +44,7 @@ MEMORY_RECALL_FUNC = None
 MEMORY_SAVE_FUNC = None
 
 try:
-    from memory import memory_recall, memory_save, memory_list, memory_delete
+    from memory import memory_recall, memory_save, memory_list, memory_delete, profile_write
     MEMORY_AVAILABLE = True
     MEMORY_RECALL_FUNC = memory_recall
     MEMORY_SAVE_FUNC = memory_save
@@ -602,7 +602,7 @@ TOOLS = {
         "name": "memory_save",
         "description": "识别到需要或值得记录的信息后，保存记忆到本地 JSON 文件，自动创建父条目。"
         "必须保存的情况：除用户外其他人的个人信息（姓名/年龄/职业）、偏好需求、约定决定、重要事项。"
-        "注意：若是用户本人的信息（个人资料、长期偏好、约定决定、重要事项），请使用write_file工具更新memory/PROFILE.md文件，不要使用此工具。"
+        "注意：若是用户本人的信息（个人资料、长期偏好、约定决定、重要事项），必须使用update_profile工具更新memory/PROFILE.md文件，不要使用memory_save工具。"
         "保持角色沉浸感：调用时说'让我记下来'或'这个我得好好记住'。",
         "parameters": {
             "type": "object",
@@ -626,6 +626,20 @@ TOOLS = {
                 },
             },
             "required": ["category", "key", "value"],
+        },
+    },
+    "update_profile": {
+        "name": "update_profile",
+        "description": "更新核心记忆文件 memory/PROFILE.md，用于记录用户本人的个人资料、长期偏好、约定决定、重要事项等核心信息。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "string",
+                    "description": "要写入 PROFILE.md 的完整内容",
+                },
+            },
+            "required": ["content"],
         },
     },
     "execute_command": {
@@ -710,6 +724,7 @@ TOOL_FUNCTIONS = {
     "execute_command": execute_command,
     "web_search": web_search,
     "web_fetch": web_fetch,
+    "update_profile": profile_write,
 }
 
 def get_tools_schema() -> List[Dict]:
